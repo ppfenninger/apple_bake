@@ -26,7 +26,19 @@ You don't need to create any tables. The site sets up its own on the first visit
 
 ### 2. Deploy
 
-**Option A, from GitHub (no terminal needed).** Go to **Workers & Pages > Create > Import a repository** and pick this repo. Leave the build command empty. The deploy command is `npx wrangler deploy`. From then on, every push to `main` redeploys the site.
+This happens on the **Cloudflare** website, not on GitHub. Cloudflare asks for permission to read your GitHub repo along the way.
+
+**Option A, from the Cloudflare dashboard (no terminal needed).**
+
+1. Make sure step 1 is done and the database ID is committed to `main`, or the first build fails.
+2. In the [Cloudflare dashboard](https://dash.cloudflare.com), click **Workers & Pages** in the left sidebar. It may sit under **Compute (Workers)**.
+3. Click **Create application**, then **Import a repository** (it may just say **GitHub**).
+4. Click **Connect GitHub** if asked. GitHub opens a page asking which repositories Cloudflare can see. Pick `apple_bake` (or all repositories), then approve.
+5. Back on Cloudflare, pick `apple_bake` from the list.
+6. Set the project name to `apple-bake`, matching `name` in `wrangler.jsonc`, or the build fails. Leave the build command empty. The deploy command is `npx wrangler deploy`, which is the default.
+7. Click **Save and Deploy** (or **Deploy**) and wait a minute for the build to finish.
+
+From then on, every push to `main` redeploys the site.
 
 **Option B, from your computer.**
 
@@ -36,7 +48,7 @@ npx wrangler login
 npx wrangler deploy
 ```
 
-Either way, the site ends up at `https://apple-bake.<your-subdomain>.workers.dev`. You can attach your own domain later under the Worker's **Settings > Domains & Routes**.
+Either way, the site ends up at `https://apple-bake.<your-subdomain>.workers.dev`. The Worker's page in the dashboard shows the exact address. You can attach your own domain later under the Worker's **Settings > Domains & Routes**.
 
 ### 3. Secrets (never put these in git)
 
