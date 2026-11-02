@@ -101,3 +101,48 @@ test('csv round trip', () => {
   const rows = [['Name', 'Notes'], ['Sam, Alex', 'said "yum"\nthen left']];
   assert.deepEqual(parseCsv(toCsv(rows)), rows);
 });
+
+test('assignment leaves backups once every category has its judges', () => {
+  const cats = [{ id: 1, name: 'A', ok: ['all'] }, { id: 2, name: 'B', ok: ['all'] }];
+  const judges = ['B1', 'B2', 'B3', 'B4', 'B5', 'C1'].map((floor, i) => ({ id: i + 1, name: 'J' + i, floor, tags: [], prefs: [] }));
+  const r = assignJudges(judges, cats, { perCat: 2, maxPerJudge: 2, diffFloors: true });
+  assert.deepEqual(r.shortages, []);
+  assert.equal(r.assigned.filter(a => a.length).length, 2, 'two judges cover both categories');
+  assert.equal(r.unassigned.length, 4);
+});
+
+test('backups fill short categories first, then join a preferred or random one', async () => {
+  const { planBackups } = await import('../src/logic.js');
+  const cats = [
+    { id: 1, name: 'Cookies', ok: ['vegetarian'], members: [10], floors: ['B1'] }, // one judge so far
+    { id: 2, name: 'Pies', ok: ['vegetarian'], members: [11, 12], floors: ['B2', 'B3'] },
+    { id: 3, name: 'Vegan', ok: ['vegan'], members: [], floors: [] }, // nobody yet
+  ];
+  const regulars = [
+    { id: 10, name: 'A', floor: 'B1', tags: [], prefs: [], load: 1, backup: false },
+    { id: 11, name: 'B', floor: 'B2', tags: [], prefs: [], load: 1, backup: false },
+    { id: 12, name: 'C', floor: 'B3', tags: [], prefs: [], load: 1, backup: false },
+  ];
+  const judges = regulars.concat([
+    { id: 23, name: 'Anyone', floor: 'C3', tags: [], prefs: [], load: 0, backup: true },
+    { id: 20, name: 'Same floor', floor: 'B1', tags: [], prefs: [1], load: 0, backup: true },
+    { id: 21, name: 'Vegan', floor: 'C1', tags: ['vegan'], prefs: [], load: 0, backup: true },
+    { id: 22, name: 'Likes pies', floor: 'C2', tags: [], prefs: [2], load: 0, backup: true },
+  ]);
+  const opts = { perCat: 2, maxPerJudge: 2, diffFloors: true, rand: () => 0 };
+  const r = planBackups({ judges, categories: cats, ...opts });
+  const where = id => r.adds.filter(a => a.judgeId === id).map(a => [a.categoryId, a.reason]);
+  assert.deepEqual(where(23), [[1, 'gap']], 'a backup fills the Cookies gap');
+  assert.ok(!where(20).some(([c]) => c === 1), 'co-judges stay on different floors');
+  assert.deepEqual(r.adds.filter(a => a.categoryId === 3).map(a => a.judgeId).sort(), [20, 21], 'Vegan gets two backups');
+  assert.deepEqual(where(22), [[2, 'preferred']], 'a spare backup joins a category they asked for');
+  assert.deepEqual(r.short, []);
+
+  const late = planBackups({ judges, categories: cats, ...opts, only: 22 });
+  assert.ok(late.adds.every(a => a.judgeId === 22));
+  assert.deepEqual(late.adds.map(a => [a.categoryId, a.reason]), [[1, 'gap'], [3, 'gap']], 'a late backup fills gaps (up to the max) before a preferred category');
+
+  const alone = planBackups({ judges: regulars, categories: cats, ...opts, maxPerJudge: 1 });
+  assert.deepEqual(alone.adds, []);
+  assert.deepEqual(alone.short.map(c => [c.name, c.have]), [['Cookies', 1], ['Vegan', 0]], 'Cookies is judged by its one judge');
+});

@@ -58,7 +58,7 @@ The site runs without the Twilio secrets. It just stays in test mode, where text
 2. Buy a phone number. A **toll-free** number is the simplest choice for one-off event texts.
 3. Submit **toll-free verification** in the Twilio console (Messaging > Regulatory compliance). US carriers block unverified numbers, and verification can take a few days to a few weeks, so do it well before the bake. A local number needs A2P 10DLC registration instead, which has fees and also takes time.
 4. On the site, go to **Admin > Settings** and enter the number as **Twilio phone number**, like `+18885551234`.
-5. On **Admin > Overview**, send yourself a test text with **Send for real**, then turn off **Test mode**.
+5. On **Admin > Overview**, use **Send yourself a real test text** in the Texting box. When it says "Delivered", turn off **Test mode**.
 
 **Rough cost:** the number is about $1 to $2 a month, and each text is about a cent once carrier fees are included. For 30 judges and a few follow-ups, expect a few dollars per bake. Check [Twilio's pricing page](https://www.twilio.com/en-us/sms/pricing/us) for current numbers. You can release the number after the bake and buy a new one next year, but then you'd need to verify again.
 
@@ -66,12 +66,24 @@ The site runs without the Twilio secrets. It just stays in test mode, where text
 
 1. **Weeks before:** In **Admin**, click **+ New event**, start from last year, and set the ingredient. Check the **Categories** tab: `{ingredient}` in a name becomes the ingredient ("Craziest {ingredient}"). "OK for" says which dietary restrictions a category is safe for.
 2. **Judge signup:** Share the `/signup` link. If you collected judges with a Google Form instead, paste the CSV export under **Judges > Import CSV**.
-3. **Assign judges** on the Overview tab. Fix anything by hand on the Judges tab, and tick **Lock** on a judge to keep your changes if you assign again.
+3. **Assign judges** on the Overview tab. Every category gets 2 judges from different floors. Judges left without a category are **backups**. Fix anything by hand on the Judges tab, and tick **Lock** on a judge to keep your changes if you assign again.
 4. **Day of, entry table:** Open `/checkin` on the laptop and enter the PIN shown on the Overview tab. Every dish gets a number to write on its plate. You can fix any dish later on the **Dishes** tab, including its category.
-5. **Start judging** on the Overview tab. This texts every judge their link. Check-in can stay open: late dishes are added and their judges get a text.
-6. **Watch the "Still waiting" list.** Use **Re-send** on the Judges tab if someone lost their text.
-7. **Voting:** Turn on **Voting is open** and print the QR code from the Overview tab for the tables. Type the GRA's and Dog's Choice winners and any paper tallies on the **Votes** tab.
-8. **Results:** Check the **Results** tab. Type a dish number in **Override #** to change any winner. Then turn on **Results are public** and share `/results`. Copy the winners' kerberos from the box at the bottom.
+5. **Judges check in** when they arrive by looking up their name at `/here` (on their phone or the check-in laptop). You can also tick **Here** on the Judges tab, or use **Check in everyone**. Only checked-in judges get texts.
+6. **Start judging** on the Overview tab. You first see who will be texted and why, then confirm.
+   - Only checked-in judges are texted. A category with fewer than 2 checked-in judges gets a checked-in backup. Other checked-in backups join a category they asked for, or a random one.
+   - A category with only one judge is still judged; that judge decides alone.
+   - A category needs at least 2 dishes to be judged. With 1 dish it wins automatically.
+   - Afterwards, a judge who checks in gets their text right away, and late dishes are added and their judges get a text.
+7. **Watch the "Still waiting" list.** Use **Re-send** on the Judges tab if someone lost their text.
+8. **Voting:** Turn on **Voting is open** and print the QR code from the Overview tab for the tables. Type the GRA's and Dog's Choice winners and any paper tallies on the **Votes** tab.
+9. **Results:** Check the **Results** tab. Type a dish number in **Override #** to change any winner. Then turn on **Results are public** and share `/results`. Copy the winners' kerberos from the box at the bottom.
+
+## If texts don't arrive
+
+- The **Texting** box on the Overview tab shows what's missing: the Twilio secrets, the Twilio phone number (Settings tab), or test mode still being on.
+- **Send yourself a real test text** from that box. The result shows right below the button. The site then asks Twilio whether the text reached the phone and explains common problems in plain English, such as an unverified toll-free number, a trial account, or a wrong auth token.
+- The **Texts** tab lists every text with its status. Click **Check delivery** to ask Twilio for the latest.
+- Every send is also logged in Cloudflare: open the `apple-bake` Worker, then **Observability** (or **Logs**). Each text shows up as a line like `{"sms":{"to":"...1234","ok":false,"status":"not sent: ..."}}`, and each Start judging press as `{"startJudging":{...}}`.
 
 ## Local development
 

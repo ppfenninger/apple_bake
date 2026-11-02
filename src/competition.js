@@ -2,7 +2,7 @@
 // tiebreaks, and working out results. Database reads/writes live here; the
 // pure decision rules are in logic.js.
 import {
-  assignJudges, decideCategory, tallyVotes, computeStandings, chooseTiebreaker,
+  assignJudges, decideCategory, tallyVotes, computeStandings, chooseTiebreaker, planBackups,
   splitList, normalizePhone, entryList, truthy,
 } from './logic.js';
 import { loadEvent, now, settingBool, settingNum } from './db.js';
@@ -11,36 +11,122 @@ import { loadEvent, now, settingBool, settingNum } from './db.js';
 // Texting
 // ---------------------------------------------------------------------------
 
-/** Sends (or, in test mode, only logs) a text. Returns {ok, status}. */
+// Plain-English explanations for the Twilio errors people actually hit.
+const TWILIO_HINTS = {
+  20003: 'Twilio rejected the account SID or auth token. Re-check the TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN secrets in Cloudflare.',
+  20404: 'Twilio could not find that account. Re-check the TWILIO_ACCOUNT_SID secret in Cloudflare.',
+  21211: 'That phone number is not valid.',
+  21408: 'Your Twilio account is not allowed to text this country (Twilio: Messaging > Settings > Geo permissions).',
+  21606: 'The Twilio phone number on the Settings tab cannot send texts from this account. Check it is a number you bought in this Twilio account.',
+  21659: 'The Twilio phone number on the Settings tab is not a number in this Twilio account.',
+  21608: 'Twilio trial accounts can only text numbers verified in Twilio (Phone Numbers > Verified Caller IDs). Verify this number or upgrade the account.',
+  21610: 'This person replied STOP to your Twilio number, so Twilio will not text them.',
+  21614: 'That number cannot receive texts (probably a landline).',
+  30003: 'The phone was off or unreachable.',
+  30005: 'That number does not exist or is not in service.',
+  30006: 'That number is a landline or its carrier cannot receive texts.',
+  30007: 'The carrier filtered it as spam.',
+  30032: 'Your toll-free number is not verified yet. US carriers block texts from unverified toll-free numbers. Finish toll-free verification in Twilio.',
+  30034: 'Your local number is not registered for A2P 10DLC. US carriers block unregistered numbers. Register it in Twilio, or use a verified toll-free number.',
+};
+export function twilioHint(code, fallback) {
+  const hint = TWILIO_HINTS[Number(code)] || fallback || 'unknown error';
+  return code ? hint + ' (Twilio error ' + code + ')' : hint;
+}
+
+/** What is and isn't set up for real texts. Shown on the admin Overview and logged with each send. */
+export function twilioState(env, settings) {
+  const sid = String(env.TWILIO_ACCOUNT_SID || '').trim();
+  const token = String(env.TWILIO_AUTH_TOKEN || '').trim();
+  const from = normalizePhone(settings.twilio_from);
+  const testMode = settingBool(settings, 'test_mode');
+  const problems = [];
+  if (!sid) problems.push('The TWILIO_ACCOUNT_SID secret is missing in Cloudflare.');
+  else if (!/^AC[0-9a-f]{32}$/i.test(sid)) problems.push('TWILIO_ACCOUNT_SID does not look like an account SID (it should start with AC and be 34 characters).');
+  if (!token) problems.push('The TWILIO_AUTH_TOKEN secret is missing in Cloudflare.');
+  if (!from) problems.push(settings.twilio_from ? 'The Twilio phone number on the Settings tab is not a valid phone number.' : 'No Twilio phone number on the Settings tab.');
+  return {
+    sid: sid ? sid.slice(0, 4) + '...' + sid.slice(-4) : '', token: !!token, from: from || '', testMode,
+    problems, ready: !problems.length, live: !problems.length && !testMode,
+  };
+}
+
+const maskPhone = p => (p ? '...' + String(p).slice(-4) : '(none)');
+
+/** Sends (or, in test mode, only logs) a text. Returns {ok, status, id}. */
 export async function sendSms(env, eventId, settings, to, body, name) {
   const db = env.DB;
-  let status, sid = '';
-  if (!to) status = 'skipped: no phone';
-  else if (settingBool(settings, 'test_mode')) status = 'TEST MODE (not sent)';
+  let status, sid = '', ok = false;
+  if (!to) status = 'not sent: no phone number';
+  else if (settingBool(settings, 'test_mode')) { status = 'TEST MODE (not sent)'; ok = true; }
   else {
-    const from = normalizePhone(settings.twilio_from);
-    if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_AUTH_TOKEN || !from) status = 'not sent: Twilio is not set up';
+    const t = twilioState(env, settings);
+    if (!t.ready) status = 'not sent: ' + t.problems.join(' ');
     else {
       try {
-        const resp = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID}/Messages.json`, {
+        const resp = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${env.TWILIO_ACCOUNT_SID.trim()}/Messages.json`, {
           method: 'POST',
           headers: {
-            Authorization: 'Basic ' + btoa(env.TWILIO_ACCOUNT_SID + ':' + env.TWILIO_AUTH_TOKEN),
+            Authorization: 'Basic ' + btoa(env.TWILIO_ACCOUNT_SID.trim() + ':' + env.TWILIO_AUTH_TOKEN.trim()),
             'Content-Type': 'application/x-www-form-urlencoded',
           },
-          body: new URLSearchParams({ To: to, From: from, Body: body }).toString(),
+          body: new URLSearchParams({ To: to, From: t.from, Body: body }).toString(),
         });
         const json = await resp.json().catch(() => ({}));
-        status = resp.ok ? 'sent' : 'error: ' + (json.message || resp.status);
+        ok = resp.ok;
         sid = json.sid || '';
+        status = resp.ok ? 'sent to Twilio, waiting for delivery report' : 'not sent: ' + twilioHint(json.code, json.message || 'HTTP ' + resp.status);
       } catch (e) {
-        status = 'error: ' + e.message;
+        status = 'not sent: could not reach Twilio (' + e.message + ')';
       }
     }
   }
-  await db.prepare('INSERT INTO sms_log (event_id, at, phone, name, body, status, sid) VALUES (?, ?, ?, ?, ?, ?, ?)')
+  console.log(JSON.stringify({ sms: { event: eventId, to: maskPhone(to), ok, status, sid } }));
+  const res = await db.prepare('INSERT INTO sms_log (event_id, at, phone, name, body, status, sid) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .bind(eventId, now(), to || '', name || '', body, status, sid).run();
-  return { ok: status === 'sent' || status.startsWith('TEST'), status };
+  return { ok, status, id: res.meta && res.meta.last_row_id };
+}
+
+/** Texts a judge and remembers that their link went out (1 = logged in test mode, 2 = sent for real). */
+async function textJudge(env, eventId, settings, judge, body) {
+  const r = await sendSms(env, eventId, settings, judge.phone, body, judge.name);
+  if (r.ok) {
+    await env.DB.prepare('UPDATE judges SET link_sent = MAX(link_sent, ?) WHERE id = ?')
+      .bind(settingBool(settings, 'test_mode') ? 1 : 2, judge.id).run();
+  }
+  return r;
+}
+
+const FINAL = /^(delivered|not delivered|read)/;
+
+/** Asks Twilio what happened to recent texts and updates their status. */
+export async function checkDelivery(env, eventId, onlyId) {
+  const db = env.DB;
+  if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_AUTH_TOKEN) return { checked: 0, rows: [] };
+  const rows = (await db.prepare("SELECT id, sid, status FROM sms_log WHERE event_id = ? AND sid != '' " + (onlyId ? 'AND id = ? ' : '') + 'ORDER BY id DESC LIMIT 40')
+    .bind(...(onlyId ? [eventId, onlyId] : [eventId])).all()).results.filter(r => !FINAL.test(r.status));
+  const sidKey = env.TWILIO_ACCOUNT_SID.trim();
+  const out = [];
+  for (const r of rows) {
+    let status;
+    try {
+      const resp = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sidKey}/Messages/${r.sid}.json`, {
+        headers: { Authorization: 'Basic ' + btoa(sidKey + ':' + env.TWILIO_AUTH_TOKEN.trim()) },
+      });
+      const m = await resp.json().catch(() => ({}));
+      if (!resp.ok) status = r.status;
+      else if (m.status === 'delivered' || m.status === 'read') status = 'delivered';
+      else if (m.status === 'undelivered' || m.status === 'failed' || m.status === 'canceled') status = 'not delivered: ' + twilioHint(m.error_code, m.error_message || m.status);
+      else if (m.status === 'sent') status = 'sent to the carrier, waiting for delivery report';
+      else status = 'sent to Twilio, waiting for delivery report (Twilio says: ' + m.status + ')';
+    } catch (e) {
+      status = r.status;
+    }
+    if (status !== r.status) await db.prepare('UPDATE sms_log SET status = ? WHERE id = ?').bind(status, r.id).run();
+    console.log(JSON.stringify({ smsDelivery: { id: r.id, sid: r.sid, status } }));
+    out.push({ id: r.id, status });
+  }
+  return { checked: out.length, rows: out };
 }
 
 function firstName(name) {
@@ -89,55 +175,142 @@ function entriesByCategory(data) {
 }
 
 /**
- * Starts judging: texts every assigned judge a link to their judging page.
- * Check-in can stay open; dishes added later are synced to the judges (syncJudging).
- * restart: clear existing judging rows first. closeCheckin: also close check-in.
+ * Starts judging: texts every checked-in judge a link to their judging page.
+ * - Only judges who checked in (judge check-in page, or "Here" on the Judges tab) are texted.
+ * - A category short on checked-in judges gets a checked-in backup judge; other checked-in backups join a
+ *   category they asked for, or a random one (planBackups).
+ * - A category with only one judge is still judged by that judge.
+ * Check-in can stay open; dishes added later are synced to the judges (syncJudging), and a judge who checks
+ * in later is texted right away (checkInJudge).
+ * restart: clear existing judging rows first. closeCheckin: also close check-in. dryRun: only report what
+ * would happen. only: limit to one judge (a late check-in).
  */
-export async function sendJudging(env, eventId, origin, { restart = false, closeCheckin = false } = {}) {
+export async function sendJudging(env, eventId, origin, { restart = false, closeCheckin = false, dryRun = false, only = null } = {}) {
   const db = env.DB;
-  if (restart) await db.prepare('DELETE FROM judging WHERE event_id = ?').bind(eventId).run();
-  if (closeCheckin) await db.prepare("INSERT INTO settings (event_id, key, value) VALUES (?, 'checkin_open', 'false') ON CONFLICT(event_id, key) DO UPDATE SET value = 'false'").bind(eventId).run();
+  if (!dryRun) {
+    if (restart) {
+      await db.prepare('DELETE FROM judging WHERE event_id = ?').bind(eventId).run();
+      await db.prepare('UPDATE judges SET link_sent = 0 WHERE event_id = ?').bind(eventId).run();
+    }
+    const set = (key, value) => db.prepare('INSERT INTO settings (event_id, key, value) VALUES (?, ?, ?) ON CONFLICT(event_id, key) DO UPDATE SET value = excluded.value').bind(eventId, key, value).run();
+    if (closeCheckin) await set('checkin_open', 'false');
+    if (!only) await set('judging_started', 'true');
+  }
   const data = await loadEvent(db, eventId);
   const s = data.settings;
+  const testMode = settingBool(s, 'test_mode');
+  const level = testMode ? 1 : 2; // judges whose link_sent is below this get a text
+  const perCat = Math.max(1, settingNum(s, 'judges_per_category', 2));
+  const maxPer = Math.max(1, settingNum(s, 'max_categories_per_judge', 2));
   const by = entriesByCategory(data);
   const judged = data.categories.filter(c => c.kind === 'judged' && c.active);
   const judgedIds = judged.map(c => c.id);
+  const catName = cid => (judged.find(c => c.id === cid) || {}).display || '?';
   const avoidOwn = settingBool(s, 'avoid_own_floor');
-  const existing = new Set(data.judging.filter(r => r.role === 'judge').map(r => r.judge_id + ':' + r.category_id));
+  const rowsIn = cid => data.judging.filter(r => r.category_id === cid);
+  const decided = new Set(judged.filter(c => decideCategory(rowsIn(c.id).map(r => ({ ...r, judge: '' }))).status === 'decided').map(c => c.id));
+  const ready = judged.filter(c => by[c.id].length >= 2 && !decided.has(c.id)); // open for (more) judges
+  const readyIds = new Set(ready.map(c => c.id));
+  const here = data.judges.filter(j => j.checked_in);
+  const hasRow = new Set(data.judging.filter(r => r.role === 'judge').map(r => r.judge_id + ':' + r.category_id));
+  const mine = j => j.assigned.filter(cid => judgedIds.includes(cid) && !decided.has(cid));
+  const openRows = j => data.judging.filter(r => r.judge_id === j.id && r.role === 'judge' && !r.closed && judgedIds.includes(r.category_id) && (r.pick === null || readyIds.has(r.category_id)));
 
-  const inserts = [];
-  const toText = [];
-  const covered = new Set();
-  data.judges.forEach(j => {
-    const mine = [];
-    j.assigned.filter(cid => judgedIds.includes(cid)).forEach(cid => {
-      if (by[cid].length < 2) return; // nothing to judge with 0 or 1 dishes
-      covered.add(cid);
-      if (existing.has(j.id + ':' + cid)) return;
-      const flags = [];
-      if (!j.phone) flags.push('no phone');
-      if (avoidOwn && j.floor && by[cid].some(e => e.floor === j.floor)) flags.push("judge's floor has dishes here");
-      mine.push(cid);
-      inserts.push(db.prepare('INSERT INTO judging (event_id, category_id, judge_id, role, entries, sent_at, flags) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .bind(eventId, cid, j.id, 'judge', JSON.stringify(by[cid].map(e => e.number)), now(), flags.join('; ')));
-    });
-    if (mine.length) toText.push({ judge: j, cats: mine });
+  // Who is judging each open category: judges with a judging row, plus checked-in judges assigned to it.
+  const members = {};
+  ready.forEach(c => {
+    members[c.id] = [...new Set(data.judging.filter(r => r.category_id === c.id && r.role === 'judge').map(r => r.judge_id)
+      .concat(here.filter(j => j.assigned.includes(c.id)).map(j => j.id)))];
   });
-  if (inserts.length) await db.batch(inserts);
+  const floorOf = id => (data.judges.find(j => j.id === id) || {}).floor;
+  const planned = planBackups({
+    judges: here.map(j => ({ id: j.id, name: j.name, floor: j.floor, tags: j.tags, prefs: j.preferred,
+      // Max categories per judge is a workload cap, so categories already decided still count.
+      load: j.assigned.filter(cid => judgedIds.includes(cid)).length, backup: !j.assigned.some(cid => judgedIds.includes(cid)) })),
+    categories: ready.map(c => ({ id: c.id, name: c.display, ok: c.ok, members: members[c.id], floors: members[c.id].map(floorOf).filter(Boolean) })),
+    perCat, maxPerJudge: maxPer, diffFloors: settingBool(s, 'cojudges_different_floors'), only,
+  });
+  const added = {};
+  planned.adds.forEach(a => (added[a.judgeId] = added[a.judgeId] || []).push(a.categoryId));
+
+  // Who gets a text: checked-in judges with a new category, or whose link hasn't gone out in this mode yet.
+  const plan = [];
+  here.filter(j => !only || j.id === only).forEach(j => {
+    const newCats = [...new Set(mine(j).concat(added[j.id] || []))].filter(cid => readyIds.has(cid) && !hasRow.has(j.id + ':' + cid));
+    const open = openRows(j).map(r => r.category_id);
+    const cats = [...new Set(open.concat(newCats))];
+    if (newCats.length || (open.length && (j.link_sent || 0) < level)) plan.push({ judge: j, newCats, cats });
+  });
+  const judgedBy = cid => (members[cid] || []).length + planned.adds.filter(a => a.categoryId === cid).length;
+  const gaps = ready.filter(c => !judgedBy(c.id)).map(c => c.display);
+  const oneJudge = ready.filter(c => judgedBy(c.id) > 0 && judgedBy(c.id) < perCat).map(c => c.display);
+  const autoWon = judged.filter(c => by[c.id].length === 1).map(c => c.display);
+  const notHere = data.judges.filter(j => !j.checked_in && j.assigned.some(cid => readyIds.has(cid))).map(j => j.name);
+  const reasonText = { gap: 'filling a gap', preferred: 'a category they asked for', random: 'a random category' };
+
+  // If nobody would get a text, say why.
+  const why = [];
+  if (!plan.length) {
+    const assignedJudges = data.judges.filter(j => j.assigned.some(cid => judgedIds.includes(cid)));
+    if (!data.judges.length) why.push('There are no judges yet. Add them on the Judges tab or share the signup link.');
+    else if (!here.length) why.push('No judge has checked in yet. Judges check in at the event on the judge check-in page, or tick "Here" on the Judges tab.');
+    if (!judged.some(c => by[c.id].length >= 2)) why.push('No category has 2 or more dishes checked in yet. A category needs at least 2 dishes before there is anything to judge (a category with 1 dish wins automatically).');
+    else if (here.length && !ready.length) why.push('Every category with 2 or more dishes is already decided.');
+    else if (here.length && !why.length && !assignedJudges.length && !planned.adds.length) why.push('No checked-in judge can take a category (check their dietary restrictions and floors).');
+    if (data.judges.length && here.length && ready.length && !why.length) why.push(testMode
+      ? 'Every checked-in judge already has their link logged. Use Re-send on the Judges tab to log it again.'
+      : 'Every checked-in judge has already been texted their link. Use Re-send on the Judges tab to text someone again.');
+  }
+  const twilio = twilioState(env, s);
+  const report = {
+    testMode, twilio, judges: plan.length, here: here.length, total: data.judges.length, gaps, oneJudge, autoWon, why, notHere,
+    noPhone: plan.filter(p => !p.judge.phone).map(p => p.judge.name),
+    backups: planned.adds.map(a => ({ name: (data.judges.find(j => j.id === a.judgeId) || {}).name, category: catName(a.categoryId), reason: reasonText[a.reason] })),
+    preview: plan.map(p => ({ name: p.judge.name, phone: p.judge.phone ? maskPhone(p.judge.phone) : '', categories: p.cats.map(catName) })),
+  };
+  if (dryRun) return report;
+
+  const stmts = [];
+  Object.keys(added).forEach(id => {
+    const j = data.judges.find(x => x.id === Number(id));
+    stmts.push(db.prepare('UPDATE judges SET assigned = ? WHERE id = ?').bind(JSON.stringify([...new Set(j.assigned.concat(added[id]))]), j.id));
+  });
+  plan.forEach(({ judge: j, newCats }) => newCats.forEach(cid => {
+    const flags = [];
+    if (!j.phone) flags.push('no phone');
+    if (avoidOwn && j.floor && by[cid].some(e => e.floor === j.floor)) flags.push("judge's floor has dishes here");
+    stmts.push(db.prepare('INSERT INTO judging (event_id, category_id, judge_id, role, entries, sent_at, flags) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .bind(eventId, cid, j.id, 'judge', JSON.stringify(by[cid].map(e => e.number)), now(), flags.join('; ')));
+  }));
+  if (stmts.length) await db.batch(stmts);
 
   let sent = 0;
-  for (const t of toText) {
-    const names = t.cats.map(cid => judged.find(c => c.id === cid).display);
+  const results = [];
+  for (const t of plan) {
+    const names = t.cats.map(catName);
     const body = `Hi ${firstName(t.judge.name)}! ${data.event.name} judging is open. You're judging ${names.join(' and ')}. ` +
       `Taste the numbered dishes, then tap to pick your favorite: ${judgeLink(origin, t.judge)}`;
-    if ((await sendSms(env, eventId, s, t.judge.phone, body, t.judge.name)).ok) sent++;
+    const r = await textJudge(env, eventId, s, t.judge, body);
+    if (r.ok) sent++;
+    results.push({ name: t.judge.name, ok: r.ok, status: r.status, id: r.id });
   }
-  const gaps = judged.filter(c => by[c.id].length >= 2 && !covered.has(c.id)).map(c => c.display);
-  const autoWon = judged.filter(c => by[c.id].length === 1).map(c => c.display);
+  console.log(JSON.stringify({ startJudging: { event: eventId, only, testMode, here: here.length, planned: plan.length, sent, backups: planned.adds.length, twilioProblems: twilio.problems } }));
   return {
-    texted: sent, judges: toText.length, testMode: settingBool(s, 'test_mode'), gaps, autoWon,
-    flagged: inserts.length ? (await db.prepare("SELECT COUNT(*) AS n FROM judging WHERE event_id = ? AND flags != ''").bind(eventId).first()).n : 0,
+    ...report, texted: sent, results,
+    flagged: stmts.length ? (await db.prepare("SELECT COUNT(*) AS n FROM judging WHERE event_id = ? AND flags != ''").bind(eventId).first()).n : 0,
   };
+}
+
+/** A judge checked in. After judging has started they are texted right away (and placed as a backup if needed). */
+export async function checkInJudge(env, eventId, judgeId, origin) {
+  const db = env.DB;
+  const judge = await db.prepare('SELECT * FROM judges WHERE id = ? AND event_id = ?').bind(judgeId, eventId).first();
+  if (!judge) return { error: 'No such judge.' };
+  if (!judge.checked_in) await db.prepare('UPDATE judges SET checked_in = 1, checked_in_at = ? WHERE id = ?').bind(now(), judgeId).run();
+  const s = await db.prepare("SELECT value FROM settings WHERE event_id = ? AND key = 'judging_started'").bind(eventId).first();
+  if (!s || s.value !== 'true') return { name: judge.name, started: false };
+  const r = await sendJudging(env, eventId, origin, { only: judgeId });
+  return { name: judge.name, started: true, texted: r.texted, results: r.results, backups: r.backups };
 }
 
 /** Re-texts one judge their link (after a fix to their phone or a late assignment). Adds rows for new assignments. */
@@ -154,7 +327,7 @@ export async function resendJudge(env, eventId, judgeId, origin) {
       .bind(eventId, cid, judgeId, 'judge', JSON.stringify(by[cid].map(e => e.number)), now()));
   if (adds.length) await db.batch(adds);
   const body = `Hi ${firstName(judge.name)}! Here's your ${data.event.name} judging link: ${judgeLink(origin, judge)}`;
-  const r = await sendSms(env, eventId, data.settings, judge.phone, body, judge.name);
+  const r = await textJudge(env, eventId, data.settings, judge, body);
   return { status: r.status, added: adds.length };
 }
 
@@ -227,12 +400,14 @@ export async function submitPicks(env, token, picks, origin) {
  * - a new dish in a category is added to its judges' lists, and they get a text; judges who
  *   had already picked must taste it and confirm or change their pick
  * - a dish removed from a category comes off the lists (a pick for it is cleared)
- * - a category that reaches 2 dishes, or a judge newly assigned, gets judging rows and a first text
+ * - after Start judging, a category that reaches 2 dishes, or a judge newly assigned or checked in, gets
+ *   judging rows and a first text (sendJudging)
  */
 export async function syncJudging(env, eventId, origin) {
   const db = env.DB;
   const started = await db.prepare('SELECT COUNT(*) AS n FROM judging WHERE event_id = ?').bind(eventId).first();
-  if (!started.n) return { started: false };
+  const flag = await db.prepare("SELECT value FROM settings WHERE event_id = ? AND key = 'judging_started'").bind(eventId).first();
+  if (!started.n && !(flag && flag.value === 'true')) return { started: false };
   const data = await loadEvent(db, eventId);
   const by = entriesByCategory(data);
   const stmts = [];
@@ -257,14 +432,6 @@ export async function syncJudging(env, eventId, origin) {
           (pick !== null ? ' Please taste it and confirm or change your pick.' : ''));
       }
     });
-    // Judges assigned to this category who have no row yet (late category or late assignment).
-    if (nums.length >= 2) {
-      data.judges.filter(j => j.assigned.includes(cat.id) && !rows.some(r => r.judge_id === j.id)).forEach(j => {
-        stmts.push(db.prepare('INSERT INTO judging (event_id, category_id, judge_id, role, entries, sent_at) VALUES (?, ?, ?, ?, ?, ?)')
-          .bind(eventId, cat.id, j.id, 'judge', JSON.stringify(nums), now()));
-        note(j.id, "You're now judging " + cat.display + ' (' + entryList(nums) + ').');
-      });
-    }
     if (changed) {
       changedCats.push(cat.id);
       // A tie that was being broken is moot now that the dishes changed.
@@ -277,10 +444,13 @@ export async function syncJudging(env, eventId, origin) {
   for (const jid of Object.keys(notes)) {
     const j = data.judges.find(x => x.id === Number(jid));
     const body = `${data.event.name}: ${notes[jid].join(' ')} Your link: ${judgeLink(origin, j)}`;
-    if ((await sendSms(env, eventId, data.settings, j.phone, body, j.name)).ok) texted++;
+    if ((await textJudge(env, eventId, data.settings, j, body)).ok) texted++;
   }
   for (const cid of changedCats) await afterPick(env, eventId, cid, origin);
-  return { started: true, texted, changedCategories: changedCats.length };
+  // A category that just reached 2 dishes, or a judge newly assigned or checked in, gets judging rows and a text.
+  let more = null;
+  if (settingBool(data.settings, 'judging_started')) more = await sendJudging(env, eventId, origin, {});
+  return { started: true, texted: texted + (more ? more.texted : 0), changedCategories: changedCats.length };
 }
 
 /** After a pick: if the category's judges are tied, bring in a tiebreaker (or ask the judges to agree). */
@@ -305,13 +475,14 @@ export async function afterPick(env, eventId, categoryId, origin) {
       const others = judgeRows.filter(x => x.judge_id !== r.judge_id).map(x => firstName((data.judges.find(y => y.id === x.judge_id) || {}).name));
       const body = `${cat.display} is a tie between ${entryList(d.finalists)}. Talk it over with ${others.join(' & ')}, ` +
         `then ONE of you submits the final pick: ${judgeLink(origin, j)}`;
-      await sendSms(env, eventId, s, j.phone, body, j.name);
+      await textJudge(env, eventId, s, j, body);
     }
     return { status: 'tiebreak-sent' };
   }
 
   const load = id => data.judging.filter(r => r.judge_id === id && r.pick === null && !r.closed).length;
-  const pool = data.judges.map(j => ({ id: j.id, name: j.name, floor: j.floor, phone: j.phone, tags: j.tags, skipTiebreak: j.skip_tiebreak }));
+  // Tiebreakers come from judges who checked in (they're at the event).
+  const pool = data.judges.filter(j => j.checked_in).map(j => ({ id: j.id, name: j.name, floor: j.floor, phone: j.phone, tags: j.tags, skipTiebreak: j.skip_tiebreak }));
   const tb = chooseTiebreaker(pool, { ok: cat.ok }, rows.map(r => r.judge_id), finalistFloors, load, settingBool(s, 'avoid_own_floor'));
   if (!tb) {
     await db.prepare("UPDATE judging SET flags = 'tie: no tiebreaker available' WHERE category_id = ? AND role = 'judge'").bind(categoryId).run();
@@ -324,7 +495,7 @@ export async function afterPick(env, eventId, categoryId, origin) {
     .bind(eventId, categoryId, judge.id, 'tiebreaker', JSON.stringify(d.finalists), now()).run();
   const body = `Hi ${firstName(judge.name)}! We need a tiebreaker for ${cat.display} at ${data.event.name}: ` +
     `taste ${entryList(d.finalists)}, then tap to pick: ${judgeLink(origin, judge)}`;
-  await sendSms(env, eventId, s, judge.phone, body, judge.name);
+  await textJudge(env, eventId, s, judge, body);
   return { status: 'tiebreak-sent', tiebreaker: judge.name };
 }
 

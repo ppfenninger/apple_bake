@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Judge check-in</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <header><h1 id="title">Judge check-in</h1></header>
+  <section class="card" id="findCard">
+    <label for="q">Judges: type your name to check in</label>
+    <input type="text" id="q" autocomplete="off" placeholder="Your name" style="font-size:20px">
+    <div id="matches" class="matches"></div>
+    <p class="sub" id="hint">Not on the list? Find the organizer.</p>
+  </section>
+  <section class="card hidden" id="doneCard">
+    <h2 id="doneTitle"></h2>
+    <p id="doneText"></p>
+    <button id="again">Check in someone else</button>
+  </section>
+  <div id="msg" class="msg hidden"></div>
+</main>
+<script src="/app.js"></script>
+<script>
+  let timer = null, last = '';
+  function search() {
+    const q = $('q').value.trim();
+    if (q === last) return;
+    last = q;
+    if (q.length < 2) { $('matches').innerHTML = ''; return; }
+    api('/api/judge-checkin?q=' + encodeURIComponent(q)).then(r => {
+      if (q !== last) return;
+      document.title = r.eventName + ' judge check-in';
+      $('title').textContent = r.eventName + ' judge check-in';
+      $('matches').innerHTML = r.judges.length
+        ? r.judges.map(j => '<button type="button" class="match" data-id="' + j.id + '"><b>' + esc(j.name) + '</b>' +
+            (j.floor ? ' <span class="sub">' + esc(j.floor) + '</span>' : '') + (j.here ? ' <span class="pill good">checked in</span>' : '') + '</button>').join('')
+        : '<p class="sub">No judge by that name.</p>';
+      $('matches').querySelectorAll('.match').forEach(b => b.addEventListener('click', () => checkIn(Number(b.dataset.id))));
+    }).catch(e => showMsg($('msg'), e.message));
+  }
+  function checkIn(id) {
+    showMsg($('msg'), '');
+    api('/api/judge-checkin', { body: { id } }).then(r => {
+      $('findCard').classList.add('hidden');
+      $('doneCard').classList.remove('hidden');
+      $('doneTitle').textContent = 'Thanks, ' + r.name.split(' ')[0] + '! You\'re checked in.';
+      $('doneText').textContent = r.message;
+    }).catch(e => showMsg($('msg'), e.message));
+  }
+  $('q').addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(search, 200); });
+  $('again').addEventListener('click', () => {
+    $('q').value = ''; last = ''; $('matches').innerHTML = '';
+    $('doneCard').classList.add('hidden'); $('findCard').classList.remove('hidden'); $('q').focus();
+  });
+  api('/api/info').then(i => { document.title = i.eventName + ' judge check-in'; $('title').textContent = i.eventName + ' judge check-in'; }).catch(() => {});
+</script>
+</body>
+</html>

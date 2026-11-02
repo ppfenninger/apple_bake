@@ -13,7 +13,8 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS judges (id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL, name TEXT NOT NULL, kerberos TEXT NOT NULL DEFAULT '',
      floor TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '', restrictions TEXT NOT NULL DEFAULT '', restriction_details TEXT NOT NULL DEFAULT '',
      preferred TEXT NOT NULL DEFAULT '[]', assigned TEXT NOT NULL DEFAULT '[]', locked INTEGER NOT NULL DEFAULT 0,
-     skip_tiebreak INTEGER NOT NULL DEFAULT 0, token TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL)`,
+     skip_tiebreak INTEGER NOT NULL DEFAULT 0, token TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,
+     link_sent INTEGER NOT NULL DEFAULT 0, checked_in INTEGER NOT NULL DEFAULT 0, checked_in_at TEXT)`,
   `CREATE TABLE IF NOT EXISTS entries (id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL, number INTEGER NOT NULL, dish TEXT NOT NULL DEFAULT '',
      name TEXT NOT NULL DEFAULT '', kerberos TEXT NOT NULL DEFAULT '', floor TEXT NOT NULL DEFAULT '', categories TEXT NOT NULL DEFAULT '[]',
      created_at TEXT NOT NULL, UNIQUE (event_id, number))`,
@@ -57,6 +58,18 @@ export async function ensureSchema(db) {
   // Columns added after the first release: add them to older databases.
   const cols = (await db.prepare('PRAGMA table_info(judging)').all()).results.map(c => c.name);
   if (!cols.includes('recheck')) await db.prepare('ALTER TABLE judging ADD COLUMN recheck INTEGER NOT NULL DEFAULT 0').run();
+  // link_sent: 0 = judge not texted yet, 1 = link logged in test mode, 2 = link sent for real.
+  const jcols = (await db.prepare('PRAGMA table_info(judges)').all()).results.map(c => c.name);
+  if (!jcols.includes('link_sent')) {
+    await db.prepare('ALTER TABLE judges ADD COLUMN link_sent INTEGER NOT NULL DEFAULT 0').run();
+    await db.prepare(`UPDATE judges SET link_sent = CASE
+      WHEN EXISTS (SELECT 1 FROM sms_log l WHERE l.event_id = judges.event_id AND l.phone = judges.phone AND judges.phone != '' AND l.status = 'sent') THEN 2
+      WHEN EXISTS (SELECT 1 FROM judging g WHERE g.judge_id = judges.id) THEN 1 ELSE 0 END`).run();
+  }
+  if (!jcols.includes('checked_in')) {
+    await db.prepare('ALTER TABLE judges ADD COLUMN checked_in INTEGER NOT NULL DEFAULT 0').run();
+    await db.prepare('ALTER TABLE judges ADD COLUMN checked_in_at TEXT').run();
+  }
   const ev = await db.prepare('SELECT id FROM events LIMIT 1').first();
   if (!ev) await createEvent(db, { name: 'Apple Bake ' + new Date().getFullYear(), copyFrom: null });
   schemaReady = true;
@@ -72,7 +85,7 @@ export async function createEvent(db, { name, copyFrom, ingredient }) {
     const rows = await db.prepare('SELECT key, value FROM settings WHERE event_id = ?').bind(copyFrom).all();
     rows.results.forEach(r => { settings[r.key] = r.value; });
     // A new event starts closed for voting/results and in test mode.
-    Object.assign(settings, { checkin_open: 'true', signup_open: 'true', voting_open: 'false', results_public: 'false', test_mode: 'true' });
+    Object.assign(settings, { checkin_open: 'true', signup_open: 'true', voting_open: 'false', results_public: 'false', test_mode: 'true', judging_started: 'false' });
   }
   settings.checkin_pin = randomPin();
   if (ingredient) settings.ingredient = ingredient;
@@ -136,7 +149,7 @@ export async function loadEvent(db, eventId) {
   return {
     event, settings, categories,
     judges: judges.results.map(j => ({
-      ...j, locked: !!j.locked, skip_tiebreak: !!j.skip_tiebreak,
+      ...j, locked: !!j.locked, skip_tiebreak: !!j.skip_tiebreak, checked_in: !!j.checked_in,
       preferred: parse(j.preferred), assigned: parse(j.assigned), tags: splitList(j.restrictions).map(s => s.toLowerCase()),
     })),
     entries: entries.results.map(e => ({ ...e, categories: parse(e.categories) })),

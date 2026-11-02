@@ -90,12 +90,30 @@ fs.mkdirSync(OUT, { recursive: true });
     await desk2.click('#next');
   }
 
+  // --- two judges check in on their phones -----------------------------------------------
+  for (const [i, name] of ['Avery', 'Blake'].entries()) {
+    const p = await phone.newPage(); watch(p, 'here');
+    await p.goto(BASE + '/here');
+    await p.fill('#q', name);
+    await p.click('.match:has-text("' + name + ' Judge")');
+    await expectVisible(p, '#doneCard', 'judge check-in ' + name);
+    if (i === 0) await shot(p, 'judge-checkin');
+    await p.close();
+  }
+
   // --- text the judges ----------------------------------------------------------------
   await admin.click('nav.tabs button:text-is("Overview")');
-  await admin.click('button:has-text("Start judging")');
-  await admin.click('button:has-text("Sure?")');
-  await expectVisible(admin, 'pre.report', 'send report');
+  await admin.click('button:text-is("Start judging")');
+  await expectVisible(admin, '.send-panel .msg', 'send preview');
+  await shot(admin, 'admin-send-preview');
+  await admin.click('.send-panel button:has-text("Log ")');
+  await admin.waitForSelector('.send-panel .msg:has-text("Logged")');
   await shot(admin, 'admin-overview');
+  // The test-text box reports Twilio problems right next to the button.
+  await admin.fill('.checks ~ .toolbar input', '617-555-0100');
+  await admin.click('.checks ~ .toolbar button:text-is("Send")');
+  await admin.waitForSelector('section:has(.checks) .msg.error');
+  await shot(admin, 'admin-test-text');
   await admin.click('nav.tabs button:text-is("Texts")');
   const links = await admin.$$eval('td a[href*="/j/"]', as => as.map(a => a.href));
   if (links.length < 2) problems.push('expected judging links in the Texts tab, got ' + links.length);

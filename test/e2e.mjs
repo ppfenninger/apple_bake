@@ -4,7 +4,7 @@
 // "E2E test" event, so run it against a local database, not the live site.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { parseRestrictions, normalizeFloor, toCsv } from '../src/logic.js';
+import { parseRestrictions, normalizeFloor, toCsv, dietOk } from '../src/logic.js';
 
 const BASE = process.env.BASE_URL || 'http://127.0.0.1:8787';
 const PASSWORD = process.env.ADMIN_PASSWORD || 'test-password';
@@ -12,7 +12,7 @@ const floors = ['B1', 'B2', 'B3', 'B4', 'B5', 'C1', 'C2', 'C3', 'C4', 'C5'];
 
 let passed = 0;
 async function step(name, fn) {
-  try { await fn(); passed++; console.log('  ok  ' + name); } catch (e) { console.log('  FAIL ' + name + '\n       ' + (e.stack || e).toString().split('\n').slice(0, 4).join('\n       ')); process.exitCode = 1; }
+  try { await fn(); passed++; console.log('  ok  ' + name); } catch (e) { console.log('  FAIL ' + name + '\n       ' + (e.stack || e).toString().split("\n").slice(0, 14).join('\n       ')); process.exitCode = 1; }
 }
 
 function client() {
@@ -44,6 +44,7 @@ else {
 }
 
 const admin = client(), judgeClient = client(), table = client(), anon = client();
+let awayIds = [];
 let A; // admin data
 const refresh = async () => { A = (await admin('/api/admin/data')).data; return A; };
 
@@ -66,6 +67,10 @@ await step('new event starts from defaults and becomes live', async () => {
   assert.equal(A.activeEventId, r.data.id);
   assert.ok(A.categories.some(c => c.display === 'Most Creative Carrot'));
   assert.equal(A.categories.filter(c => c.kind === 'special').length, 5);
+  const pre = (await admin('/api/admin/send-judging', { body: { dryRun: true } })).data;
+  assert.equal(pre.judges, 0);
+  assert.match(pre.why.join(' '), /no judges/);
+  assert.equal(pre.twilio.testMode, true);
 });
 const eventId = A.activeEventId;
 
@@ -153,9 +158,51 @@ await step('check-in needs the PIN, then records dishes; duplicate numbers are r
 });
 
 await step('starting judging texts each judge a link (test mode) and leaves check-in open', async () => {
+  // Nobody has checked in yet, so nobody would be texted.
+  const none = (await admin('/api/admin/send-judging', { body: { dryRun: true } })).data;
+  assert.equal(none.judges, 0);
+  assert.match(none.why.join(' '), /checked in/);
+  // Judges check in on the public page by looking up their name. Three assigned judges stay away for now.
+  await refresh();
+  const dishCount = cid => A.entries.filter(e => e.categories.includes(cid)).length;
+  awayIds = A.judges.filter(j => j.assigned.some(cid => dishCount(cid) >= 2)).slice(0, 3).map(j => j.id);
+  const first = A.judges.find(j => !awayIds.includes(j.id));
+  const found = (await anon('/api/judge-checkin?q=' + encodeURIComponent(first.name.toLowerCase()))).data;
+  assert.ok(found.judges.some(j => j.id === first.id), 'name lookup finds the judge');
+  assert.equal((await anon('/api/judge-checkin?q=a')).data.judges.length, 0, 'needs 2+ letters');
+  for (const j of A.judges.filter(j => !awayIds.includes(j.id))) {
+    const c = await anon('/api/judge-checkin', { body: { id: j.id } });
+    assert.equal(c.status, 200, JSON.stringify(c.data));
+    assert.equal(c.data.started, false);
+  }
+  const backupsBefore = (await refresh()).judges.filter(j => !j.assigned.length).length;
   const r = await admin('/api/admin/send-judging', { body: {} });
   assert.equal(r.status, 200, JSON.stringify(r.data));
   assert.equal(r.data.testMode, true);
+  const away = A.judges.filter(j => awayIds.includes(j.id)).map(j => j.name);
+  assert.ok(!r.data.results.some(x => away.includes(x.name)), 'judges who are not checked in get no text');
+  assert.equal(away.length, 3);
+  assert.deepEqual(r.data.notHere.sort(), away.sort());
+  // A category can only be left without a checked-in judge if no checked-in judge could take it.
+  await refresh();
+  const maxPer = Number(A.settings.max_categories_per_judge || 2);
+  for (const g of r.data.gaps) {
+    const cat = A.categories.find(c => c.display === g);
+    const free = A.judges.filter(j => j.checked_in && j.assigned.length < maxPer && dietOk(j, cat));
+    assert.deepEqual(free.map(j => j.name), [], g + ' has no judge although a checked-in judge had room');
+  }
+  if (r.data.gaps.length) console.log('       no free judge for: ' + r.data.gaps.join(', ') + ' (assigning one by hand)');
+  // Like an organizer would: give each gap to a checked-in judge by hand. They get a text right away.
+  for (const g of r.data.gaps) {
+    const cat = A.categories.find(c => c.display === g);
+    const j = A.judges.find(x => x.checked_in && dietOk(x, cat) && !x.assigned.includes(cat.id));
+    const logBefore = A.log.length;
+    await admin('/api/admin/rows/judges/' + j.id, { method: 'PATCH', body: { values: { assigned: j.assigned.concat(cat.id) } } });
+    await refresh();
+    assert.ok(A.judging.some(x => x.judge_id === j.id && x.category_id === cat.id), 'hand assignment creates a judging row');
+    assert.equal(A.log.length - logBefore, 1, 'and texts that judge');
+  }
+  console.log('       ' + backupsBefore + ' backups; placed: ' + (r.data.backups.map(b => b.name + ' to ' + b.category + ' (' + b.reason + ')').join('; ') || 'none'));
   await refresh();
   assert.equal(A.settings.checkin_open, 'true');
   assert.ok(A.log.length >= r.data.judges && r.data.judges > 5);
@@ -168,10 +215,53 @@ await step('starting judging texts each judge a link (test mode) and leaves chec
   assert.equal(again.data.judges, 0, 'a second run should not re-text anyone');
 });
 
+await step('a judge who checks in after judging started is texted right away', async () => {
+  const late = A.judges.find(j => j.id === awayIds[0]);
+  const logBefore = A.log.length;
+  const c = await anon('/api/judge-checkin', { body: { id: late.id } });
+  assert.equal(c.status, 200, JSON.stringify(c.data));
+  assert.equal(c.data.started, true);
+  assert.match(c.data.message, /texted you your judging link/);
+  await refresh();
+  const texts = A.log.slice(0, A.log.length - logBefore);
+  assert.equal(texts.length, 1);
+  assert.equal(texts[0].name, late.name);
+  assert.ok(A.judging.some(r => r.judge_id === late.id), 'their judging rows exist now');
+  console.log('       late check-in text: ' + texts[0].body);
+});
+
+await step('preview explains an empty send; judges only logged in test mode get real texts later', async () => {
+  const pre = (await admin('/api/admin/send-judging', { body: { dryRun: true } })).data;
+  assert.equal(pre.judges, 0);
+  assert.match(pre.why.join(' '), /already/);
+  await admin('/api/admin/settings', { method: 'PUT', body: { values: { test_mode: false } } });
+  const live = (await admin('/api/admin/send-judging', { body: { dryRun: true } })).data;
+  assert.ok(live.judges > 5, 'judges whose link was only logged in test mode should be texted for real');
+  assert.equal(live.twilio.ready, false);
+  assert.ok(live.twilio.problems.some(p => /TWILIO_ACCOUNT_SID/.test(p)));
+  const rowsBefore = (await refresh()).judging.length;
+  const sent = (await admin('/api/admin/send-judging', { body: {} })).data;
+  assert.equal(sent.texted, 0);
+  assert.match(sent.results[0].status, /^not sent: .*TWILIO_ACCOUNT_SID/);
+  assert.equal((await refresh()).judging.length, rowsBefore, 'no new judging rows');
+  const retry = (await admin('/api/admin/send-judging', { body: { dryRun: true } })).data;
+  assert.equal(retry.judges, live.judges, 'texts that failed are tried again next time');
+  await admin('/api/admin/settings', { method: 'PUT', body: { values: { test_mode: true } } });
+  const t = (await admin('/api/admin/test-sms', { body: { to: '617-555-0100', real: true } })).data;
+  assert.equal(t.ok, false);
+  assert.match(t.status, /TWILIO_ACCOUNT_SID/);
+  assert.ok(t.id > 0);
+  const d = (await admin('/api/admin/check-delivery', { body: { id: t.id } })).data;
+  assert.equal(d.checked, 0);
+  console.log('       empty-send reason: ' + pre.why[0]);
+  console.log('       without Twilio keys: ' + sent.results[0].status);
+});
+
 let tieCat = null;
 await step('judges pick through their links; a split brings in a tiebreaker', async () => {
   const rows = A.judging;
-  tieCat = rows.find(r => r.entries.length >= 3).category_id;
+  const judgesIn = cid => rows.filter(r => r.category_id === cid && r.role === 'judge').length;
+  tieCat = rows.find(r => r.entries.length >= 3 && judgesIn(r.category_id) === 2).category_id;
   let split = false;
   for (const j of A.judges) {
     const v = (await judgeClient('/api/judge/' + j.token)).data;
