@@ -17,7 +17,7 @@
       "binding": "DB",
       "database_name": "apple-bake",
       // Replace with the ID Cloudflare shows after you create the database (README step 2).
-      "database_id": "REPLACE-WITH-YOUR-D1-DATABASE-ID"
+      "database_id": "80ea8924-e7be-4732-bfba-223668b124fe"
     }
   ],
   "observability": { "enabled": true }
