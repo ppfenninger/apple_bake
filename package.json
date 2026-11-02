@@ -1,0 +1,15 @@
+{
+  "name": "apple-bake",
+  "private": true,
+  "type": "module",
+  "description": "Dorm baking competition: judge signup, check-in, judging links by text, voting, results and floor standings.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test test/logic.test.js",
+    "test:e2e": "node test/e2e.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.45.0"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  // Cloudflare settings for the site. See README.md for how to deploy.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "apple-bake",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-10-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page",
+    // Judge links (/j/...) and the API must reach the Worker, even for page loads.
+    "run_worker_first": ["/j/*", "/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "apple-bake",
+      // Replace with the ID Cloudflare shows after you create the database (README step 2).
+      "database_id": "REPLACE-WITH-YOUR-D1-DATABASE-ID"
+    }
+  ],
+  "observability": { "enabled": true }
+}

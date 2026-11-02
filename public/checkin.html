@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Check-in</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <header><h1 id="title">Check-in</h1><span class="sub" id="count"></span></header>
+
+  <section class="card hidden" id="pinCard">
+    <label for="pin">Check-in PIN</label>
+    <input type="password" id="pin" inputmode="numeric" autocomplete="off">
+    <div style="height:12px"></div>
+    <button class="primary" id="pinBtn">Open check-in</button>
+    <p class="sub">Organizers find the PIN on the admin page.</p>
+    <div id="pinMsg" class="msg hidden"></div>
+  </section>
+
+  <section id="formCard" class="card hidden">
+    <div class="row">
+      <div><label for="name">Baker name(s)</label><input type="text" id="name" autocomplete="off" placeholder="Sam and Alex"></div>
+      <div><label for="kerberos">Kerberos (one, for the prize)</label><input type="text" id="kerberos" autocomplete="off" autocapitalize="none" placeholder="kerb"></div>
+    </div>
+    <label>Floor</label>
+    <div class="chips" id="floors"></div>
+    <div id="dishes"></div>
+    <button type="button" class="link-btn" id="addDish">+ Add another dish</button>
+    <div style="height:8px"></div>
+    <button class="primary" id="submit">Check in</button>
+    <div id="formMsg" class="msg hidden"></div>
+  </section>
+
+  <section id="doneCard" class="card hidden" style="text-align:center">
+    <div class="sub">Write on the tape:</div>
+    <div id="numbers"></div>
+    <div style="height:14px"></div>
+    <button class="primary" id="next">Next baker</button>
+  </section>
+
+  <section id="closedCard" class="card hidden">
+    <h2>Check-in is closed</h2>
+    <p class="muted">Judging links have gone out. An organizer can reopen check-in on the admin page.</p>
+  </section>
+
+  <section id="recentCard" class="card hidden">
+    <h2>Latest entries</h2>
+    <div class="scroll"><table><thead><tr><th>#</th><th>Dish</th><th>Baker</th><th>Floor</th><th>Category</th></tr></thead><tbody id="recent"></tbody></table></div>
+  </section>
+</main>
+<script src="/app.js"></script>
+<script>
+  let info = null;
+
+  function load() {
+    return api('/api/checkin').then(data => {
+      info = data;
+      document.title = data.eventName + ' check-in';
+      $('title').textContent = data.eventName + ' check-in';
+      $('pinCard').classList.add('hidden');
+      $('count').textContent = data.count + ' dish' + (data.count === 1 ? '' : 'es') + ' so far';
+      $('closedCard').classList.toggle('hidden', data.open);
+      $('formCard').classList.toggle('hidden', !data.open || !$('doneCard').classList.contains('hidden'));
+      $('recentCard').classList.toggle('hidden', !data.recent.length);
+      $('recent').innerHTML = data.recent.map(r => '<tr><td><b>' + r.number + '</b></td><td>' + esc(r.dish) + '</td><td>' + esc(r.name) +
+        '</td><td>' + esc(r.floor) + '</td><td>' + esc(r.categories.join(', ')) + '</td></tr>').join('');
+      return data;
+    });
+  }
+
+  function addDish() {
+    const i = $('dishes').children.length + 1;
+    const d = document.createElement('div');
+    d.className = 'dish';
+    d.innerHTML =
+      '<div class="dish-head"><b>Dish ' + i + '</b>' + (i > 1 ? '<button type="button" class="link-btn remove">Remove</button>' : '') + '</div>' +
+      '<label>Dish name</label><input type="text" class="dishName" autocomplete="off" placeholder="Carrot cake with cream cheese frosting">' +
+      (info.manualNumbers ? '<label>Number on the tape</label><input type="number" class="dishNumber" inputmode="numeric">' : '') +
+      '<label>Category' + (info.maxPerDish > 1 ? ' (up to ' + info.maxPerDish + ')' : '') + '</label><div class="chips cats"></div>';
+    renderChips(d.querySelector('.cats'), info.categories.map(c => ({ value: c.id, label: c.name })), info.maxPerDish);
+    const rm = d.querySelector('.remove');
+    if (rm) rm.addEventListener('click', () => d.remove());
+    $('dishes').appendChild(d);
+  }
+
+  function resetForm() {
+    $('name').value = ''; $('kerberos').value = '';
+    renderChips($('floors'), info.floors, 1);
+    $('dishes').innerHTML = '';
+    addDish();
+    showMsg($('formMsg'), '');
+  }
+
+  function start() {
+    load().then(resetForm).catch(e => {
+      if (e.status === 401) $('pinCard').classList.remove('hidden');
+      else showMsg($('pinMsg'), e.message);
+    });
+  }
+
+  $('pinBtn').addEventListener('click', () => {
+    api('/api/checkin/login', { body: { pin: $('pin').value.trim() } })
+      .then(start).catch(e => showMsg($('pinMsg'), e.message));
+  });
+  $('pin').addEventListener('keydown', e => { if (e.key === 'Enter') $('pinBtn').click(); });
+  $('addDish').addEventListener('click', addDish);
+
+  $('submit').addEventListener('click', () => {
+    const dishes = Array.from($('dishes').children).map(d => ({
+      dish: d.querySelector('.dishName').value,
+      number: d.querySelector('.dishNumber') ? d.querySelector('.dishNumber').value : '',
+      categories: chipValues(d.querySelector('.cats')).map(Number),
+    }));
+    $('submit').disabled = true;
+    api('/api/checkin', { body: { name: $('name').value, kerberos: $('kerberos').value, floor: chipValues($('floors'))[0] || '', dishes } })
+      .then(saved => {
+        $('numbers').innerHTML = saved.map(s => '<div style="margin:12px 0"><div class="big">#' + s.number + '</div><div>' + esc(s.dish) +
+          ' <span class="muted">· ' + esc(s.categories) + '</span></div></div>').join('');
+        $('formCard').classList.add('hidden');
+        $('doneCard').classList.remove('hidden');
+        load();
+      })
+      .catch(e => showMsg($('formMsg'), e.message))
+      .finally(() => { $('submit').disabled = false; });
+  });
+
+  $('next').addEventListener('click', () => {
+    $('doneCard').classList.add('hidden');
+    $('formCard').classList.remove('hidden');
+    resetForm();
+    $('name').focus();
+  });
+
+  start();
+</script>
+</body>
+</html>
