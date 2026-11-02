@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Judge signup</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <header><h1 id="title">Judge signup</h1></header>
+  <section class="card" id="formCard">
+    <p class="muted" id="loading">Loading…</p>
+    <div id="form" class="hidden">
+      <p class="muted" style="margin-top:0">On the day you'll get a text with a link. Taste the numbered dishes in your categories, tap your favorite, and you're done.</p>
+      <div class="row">
+        <div><label for="name">Name</label><input type="text" id="name" autocomplete="name"></div>
+        <div><label for="email">MIT email</label><input type="email" id="email" autocomplete="email" autocapitalize="none" placeholder="kerb@mit.edu"></div>
+      </div>
+      <label for="phone">Cell number (for the judging text)</label>
+      <input type="tel" id="phone" autocomplete="tel" placeholder="617-555-1234">
+      <label>Floor</label>
+      <div class="chips" id="floors"></div>
+      <label>Dietary restrictions or allergies</label>
+      <div class="chips" id="restrictions"></div>
+      <input type="text" id="details" placeholder="Anything else? e.g. sesame allergy" style="margin-top:8px">
+      <label>Categories you'd like to judge (optional)</label>
+      <div class="sub" style="margin-bottom:6px">We try to give you these, but we balance judges across categories.</div>
+      <div class="chips" id="cats"></div>
+      <div style="height:16px"></div>
+      <button class="primary" id="submit">Sign up</button>
+    </div>
+    <div id="msg" class="msg hidden"></div>
+  </section>
+  <section class="card hidden" id="done">
+    <h2>You're signed up. Thank you!</h2>
+    <p class="muted">Watch for a text on the day. Signing up again with the same email updates your answers.</p>
+  </section>
+  <section class="card hidden" id="closed">
+    <h2>Judge signup is closed</h2>
+    <p class="muted">Ask an organizer if you'd still like to help.</p>
+  </section>
+</main>
+<script src="/app.js"></script>
+<script>
+  api('/api/signup').then(info => {
+    document.title = 'Judge ' + info.eventName;
+    $('title').textContent = 'Judge ' + info.eventName;
+    $('loading').classList.add('hidden');
+    if (!info.open) { $('formCard').classList.add('hidden'); $('closed').classList.remove('hidden'); return; }
+    $('form').classList.remove('hidden');
+    renderChips($('floors'), info.floors, 1);
+    renderChips($('restrictions'), info.restrictions, 0);
+    renderChips($('cats'), info.categories.map(c => ({ value: c.id, label: c.name })), 0);
+  }).catch(e => { $('loading').classList.add('hidden'); showMsg($('msg'), e.message); });
+
+  $('submit').addEventListener('click', () => {
+    $('submit').disabled = true;
+    api('/api/signup', { body: {
+      name: $('name').value, email: $('email').value, phone: $('phone').value,
+      floor: chipValues($('floors'))[0] || '', restrictions: chipValues($('restrictions')),
+      details: $('details').value, prefs: chipValues($('cats')).map(Number),
+    } }).then(() => {
+      $('formCard').classList.add('hidden');
+      $('done').classList.remove('hidden');
+    }).catch(e => showMsg($('msg'), e.message)).finally(() => { $('submit').disabled = false; });
+  });
+</script>
+</body>
+</html>

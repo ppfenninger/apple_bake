@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Results</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main class="wide">
+  <header>
+    <h1 id="title">Results</h1>
+    <div><select id="eventPick" class="hidden" aria-label="Event" style="width:auto"></select> <span class="sub" id="status">Loading…</span></div>
+  </header>
+  <section id="hidden" class="card hidden">
+    <h2>Results are coming soon</h2>
+    <p class="muted">The judges are still tasting. This page updates by itself.</p>
+  </section>
+  <section id="floors" class="card hidden">
+    <h2>Floor standings</h2>
+    <table><thead><tr><th>Rank</th><th>Floor</th><th>Wins</th><th></th></tr></thead><tbody id="standings"></tbody></table>
+  </section>
+  <h2 id="specialTitle" class="hidden" style="margin-top:20px">Special awards</h2>
+  <div class="grid" id="special"></div>
+  <h2 id="judgedTitle" class="hidden" style="margin-top:20px">Judged categories</h2>
+  <div class="grid" id="judged"></div>
+</main>
+<script src="/app.js"></script>
+<script>
+  const params = new URLSearchParams(location.search);
+  function card(r) {
+    const place = r.place === 2 ? ' (runner-up)' : (r.place > 2 ? ' (#' + r.place + ')' : '');
+    if (!r.decided) return '<div class="win pending"><div class="cat">' + esc(r.category + place) + '</div><div class="num">Still judging…</div></div>';
+    return '<div class="win"><div class="cat">' + esc(r.category + place) + '</div><div class="num">#' + r.entry + '</div>' +
+      '<div>' + esc(r.dish) + '</div><div class="sub">' + esc(r.name) + (r.floor ? ' · ' + esc(r.floor) : '') + '</div></div>';
+  }
+  function render(d) {
+    document.title = d.eventName + ' results';
+    $('title').textContent = d.eventName + ' results';
+    const sel = $('eventPick');
+    if (d.events && d.events.length) {
+      sel.innerHTML = '<option value="">This year</option>' + d.events.map(e => '<option value="' + e.id + '">' + esc(e.name) + '</option>').join('');
+      sel.value = params.get('event') || '';
+      sel.classList.remove('hidden');
+    }
+    if (!d.public) { $('hidden').classList.remove('hidden'); $('status').textContent = ''; return; }
+    $('hidden').classList.add('hidden');
+    $('status').textContent = d.complete ? 'Final' : 'Live · updates every 30 seconds';
+    $('floors').classList.toggle('hidden', !d.standings.length);
+    $('standings').innerHTML = d.standings.map(s => '<tr><td>' + s.rank + '</td><td><b>' + esc(s.floor) + '</b></td><td>' + s.wins +
+      '</td><td class="prize">' + (s.prize ? '\u{1F3C6} Prize' : '') + '</td></tr>').join('');
+    const special = d.results.filter(r => r.type === 'special'), judged = d.results.filter(r => r.type === 'judged');
+    $('specialTitle').classList.toggle('hidden', !special.length);
+    $('judgedTitle').classList.toggle('hidden', !judged.length);
+    $('special').innerHTML = special.map(card).join('');
+    $('judged').innerHTML = judged.map(card).join('');
+  }
+  function refresh() {
+    api('/api/results' + (params.get('event') ? '?event=' + encodeURIComponent(params.get('event')) : '')).then(render)
+      .catch(e => { $('status').textContent = e.message; });
+  }
+  $('eventPick').addEventListener('change', e => { location.search = e.target.value ? '?event=' + e.target.value : ''; });
+  refresh();
+  setInterval(refresh, 30000);
+</script>
+</body>
+</html>

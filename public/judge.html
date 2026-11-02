@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Judging</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <header><h1 id="title">Judging</h1></header>
+  <p class="muted" id="intro">Loading…</p>
+  <div id="rows"></div>
+  <div id="actions" class="hidden">
+    <button class="primary" id="submit">Submit my picks</button>
+  </div>
+  <div id="msg" class="msg hidden"></div>
+</main>
+<script src="/app.js"></script>
+<script>
+  const token = location.pathname.split('/').filter(Boolean).pop();
+  let view = null;
+  const chosen = {};
+
+  function render(v) {
+    view = v;
+    document.title = v.eventName + ' judging';
+    $('title').textContent = v.eventName + ' judging';
+    const open = v.rows.filter(r => !r.locked && !r.closed);
+    if (!v.rows.length) {
+      $('intro').textContent = 'Hi ' + v.judgeName + '! Nothing to judge yet. You\'ll get a text when there is.';
+    } else if (!open.length) {
+      $('intro').textContent = 'Thank you, ' + v.judgeName + '! Your picks are in.';
+    } else if (open.every(r => r.pick !== null)) {
+      $('intro').textContent = 'Thanks, ' + v.judgeName + '! Your picks are saved. You can still change them until the other judges finish.';
+    } else {
+      $('intro').textContent = 'Hi ' + v.judgeName + '! Taste each numbered dish, then tap your favorite in each category.';
+    }
+    $('rows').innerHTML = v.rows.filter(r => !r.closed || r.pick !== null).map(r => {
+      const sel = chosen[r.id] !== undefined ? chosen[r.id] : (r.pick !== null ? r.pick : (r.recheck ? r.previous : null));
+      return '<section class="card" data-row="' + r.id + '"><h2>' + esc(r.category) + '</h2>' +
+        (r.note ? '<p class="note">' + esc(r.note) + '</p>' : '') +
+        '<div class="picks">' + r.entries.map(n => '<button type="button" class="pick" data-n="' + n + '" aria-pressed="' + (sel === n) + '"' +
+          (r.locked ? ' disabled' : '') + '>#' + n + '</button>').join('') + '</div>' +
+        (r.locked ? '<p class="sub">' + (r.pick !== null ? 'Locked in: #' + r.pick : 'Closed') + '</p>' : '') + '</section>';
+    }).join('');
+    $('actions').classList.toggle('hidden', !open.length);
+    document.querySelectorAll('.pick:not(:disabled)').forEach(b => b.addEventListener('click', () => {
+      const row = b.closest('[data-row]');
+      chosen[row.dataset.row] = Number(b.dataset.n);
+      row.querySelectorAll('.pick').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    }));
+  }
+
+  function load() {
+    return api('/api/judge/' + encodeURIComponent(token)).then(render).catch(e => { $('intro').textContent = e.message; });
+  }
+
+  $('submit').addEventListener('click', () => {
+    const picks = {};
+    view.rows.filter(r => !r.locked && !r.closed).forEach(r => {
+      const v = chosen[r.id] !== undefined ? chosen[r.id] : (r.pick !== null ? r.pick : (r.recheck ? r.previous : null));
+      if (v !== null && v !== undefined) picks[r.id] = v;
+    });
+    if (!Object.keys(picks).length) return showMsg($('msg'), 'Tap a dish number first.');
+    $('submit').disabled = true;
+    api('/api/judge/' + encodeURIComponent(token), { body: { picks } }).then(r => {
+      Object.keys(chosen).forEach(k => delete chosen[k]);
+      render(r.view);
+      const missing = r.view.rows.filter(x => !x.locked && !x.closed && x.pick === null).length;
+      showMsg($('msg'), r.errors.length ? r.errors.join(' ') : (missing ? 'Saved. ' + missing + ' categor' + (missing === 1 ? 'y' : 'ies') + ' still to pick.' : 'Saved. Thank you for judging!'), r.errors.length ? 'error' : 'ok');
+    }).catch(e => showMsg($('msg'), e.message)).finally(() => { $('submit').disabled = false; });
+  });
+  load();
+  // Pick up tiebreaks that arrive while the page is open.
+  setInterval(() => { if (!Object.keys(chosen).length) load(); }, 30000);
+</script>
+</body>
+</html>

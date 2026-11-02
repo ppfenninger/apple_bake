@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Organizer admin</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+<main class="admin">
+  <section class="card hidden" id="login" style="max-width:420px;margin:40px auto">
+    <h2>Organizer login</h2>
+    <label for="password">Password</label>
+    <input type="password" id="password" autocomplete="current-password">
+    <div style="height:12px"></div>
+    <button class="primary" id="loginBtn">Log in</button>
+    <div id="loginMsg" class="msg hidden"></div>
+  </section>
+
+  <div id="app" class="hidden">
+    <header>
+      <div>
+        <h1 id="eventTitle">Admin</h1>
+        <div class="sub" id="liveNote"></div>
+      </div>
+      <div class="toolbar" style="margin:0">
+        <select id="eventPick" aria-label="Event" style="width:auto"></select>
+        <button id="makeLive" class="hidden">Make this the live event</button>
+        <button id="newEventBtn">+ New event</button>
+        <button id="logout">Log out</button>
+      </div>
+    </header>
+
+    <section class="card hidden" id="newEvent">
+      <h2>New event</h2>
+      <p class="muted" style="margin-top:0">The new event becomes the live one for signup, check-in, voting and results. Every past event stays saved; pick it from the menu above to see it.</p>
+      <div class="row">
+        <div><label for="neName">Name</label><input type="text" id="neName" placeholder="Potato Bake 2027"></div>
+        <div><label for="neIngredient">Special ingredient</label><input type="text" id="neIngredient" placeholder="Potato"></div>
+      </div>
+      <label for="neCopy">Start with</label>
+      <select id="neCopy"></select>
+      <div style="height:12px"></div>
+      <div class="toolbar"><button class="primary" id="neCreate" style="width:auto">Create event</button><button id="neCancel">Cancel</button></div>
+      <div id="neMsg" class="msg hidden"></div>
+    </section>
+
+    <nav class="tabs" id="tabs"></nav>
+    <div id="msg" class="msg hidden" style="margin:0 0 12px"></div>
+    <div id="view"></div>
+  </div>
+</main>
+<script src="/app.js"></script>
+<script src="/admin.js"></script>
+</body>
+</html>

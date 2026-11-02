@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vote</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<main>
+  <header><h1 id="title">Vote</h1><a class="sub" href="/results">Results</a></header>
+  <section class="card" id="voteCard">
+    <p class="muted" id="loading">Loading…</p>
+    <div id="form" class="hidden">
+      <label>What are you voting for?</label>
+      <div class="chips" id="cats"></div>
+      <label for="entry">Number on your favorite dish</label>
+      <input type="number" id="entry" inputmode="numeric" placeholder="e.g. 42" style="font-size:28px;font-weight:700">
+      <div style="height:14px"></div>
+      <button class="primary" id="submit">Vote</button>
+      <p class="sub" id="already"></p>
+    </div>
+    <div id="msg" class="msg hidden"></div>
+  </section>
+  <section class="card hidden" id="closed">
+    <h2>Voting isn't open right now</h2>
+    <p class="muted">Check back once the tables open for tasting.</p>
+  </section>
+</main>
+<script src="/app.js"></script>
+<script>
+  function voted() { try { return JSON.parse(localStorage.getItem('voted') || '{}'); } catch (e) { return {}; } }
+  function remember(cat, n) { try { const v = voted(); v[cat] = n; localStorage.setItem('voted', JSON.stringify(v)); } catch (e) {} }
+  function showAlready() {
+    const v = voted(), keys = Object.keys(v);
+    $('already').textContent = keys.length ? 'You voted: ' + keys.map(k => k + ' #' + v[k]).join(', ') + '. One vote per category, please!' : '';
+  }
+  api('/api/vote').then(info => {
+    document.title = info.eventName + ' voting';
+    $('title').textContent = info.eventName + ' voting';
+    $('loading').classList.add('hidden');
+    if (!info.open || !info.categories.length) { $('voteCard').classList.add('hidden'); $('closed').classList.remove('hidden'); return; }
+    $('form').classList.remove('hidden');
+    const opts = info.categories.map(c => ({ value: c.id, label: c.name }));
+    renderChips($('cats'), opts, 1, [opts[0].value]);
+    showAlready();
+  }).catch(e => { $('loading').classList.add('hidden'); showMsg($('msg'), e.message); });
+
+  $('submit').addEventListener('click', () => {
+    const cat = chipValues($('cats'))[0];
+    if (!cat) return showMsg($('msg'), 'Pick a category first.');
+    $('submit').disabled = true;
+    api('/api/vote', { body: { categoryId: Number(cat), entry: $('entry').value } }).then(r => {
+      remember(r.category, r.number);
+      showMsg($('msg'), 'Thanks! Your ' + r.category + ' vote for #' + r.number + (r.dish ? ' (' + r.dish + ')' : '') + ' is in.', 'ok');
+      $('entry').value = '';
+      showAlready();
+    }).catch(e => showMsg($('msg'), e.message)).finally(() => { $('submit').disabled = false; });
+  });
+  $('entry').addEventListener('keydown', e => { if (e.key === 'Enter') $('submit').click(); });
+</script>
+</body>
+</html>
