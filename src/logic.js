@@ -168,6 +168,32 @@ export function assignJudges(judges, categories, opts) {
     }
   });
 
+  // Free up backups: a judge whose only category isn't one they asked for hands it to a judge who has
+  // room (and ideally asked for it), so the first judge goes on the backup list. Coverage, diets and the
+  // floor rule are kept. Backups who check in at the event fill gaps or join a category they asked for.
+  if (!opts.spread) {
+    const prefers = (i, cid) => (judges[i].prefs || []).includes(cid);
+    const idx = judges.map((j, i) => i);
+    // Backups should be judges who can take almost any category, so free those first and hand the
+    // categories to judges with more dietary limits.
+    const reach = idx.map(i => categories.filter(c => dietOk(judges[i], c)).length);
+    idx.filter(i => !judges[i].locked && assigned[i].length === 1 && !prefers(i, assigned[i][0]))
+      .sort((a, b) => reach[b] - reach[a] || b - a).forEach(d => {
+      if (assigned[d].length !== 1) return;
+      const cid = assigned[d][0];
+      const cat = categories.find(c => c.id === cid);
+      const others = inCat[cid].filter(i => i !== d);
+      const floors = others.map(i => judges[i].floor).filter(Boolean);
+      const recv = idx.filter(i => i !== d && !judges[i].locked && assigned[i].length > 0 && assigned[i].length < max &&
+          !assigned[i].includes(cid) && dietOk(judges[i], cat) && !(opts.diffFloors && judges[i].floor && floors.includes(judges[i].floor)))
+        .sort((a, b) => compareArrays([prefers(a, cid) ? 0 : 1, reach[a], a], [prefers(b, cid) ? 0 : 1, reach[b], b]))[0];
+      if (recv === undefined) return;
+      assigned[d] = [];
+      assigned[recv].push(cid);
+      inCat[cid] = others.concat(recv);
+    });
+  }
+
   return {
     assigned,
     shortages: categories.filter(c => inCat[c.id].length < per).map(c => ({ category: c.name, have: inCat[c.id].length, need: per })),
@@ -247,6 +273,51 @@ export function chooseTiebreaker(judges, cat, inCatJudgeIds, finalistFloors, loa
       [finalistFloors.includes(b.floor) ? 1 : 0, load(b.id), b.name]))[0] || null;
 }
 
+/**
+ * At send time (or when a judge checks in late), uses checked-in judges to cover the categories.
+ * judges: checked-in judges [{id, name, floor, tags, prefs: [catId], load, backup}] where load is how many
+ *   categories they already judge and backup means they have no category of their own.
+ * categories: categories open for judging [{id, name, ok, members: [judgeId], floors: [floor]}]
+ * Returns {adds: [{judgeId, categoryId, reason: 'gap' | 'preferred' | 'random'}], short: [{id, name, have}]}.
+ * 1. Each category with fewer than perCat judges gets a backup judge (then anyone with room).
+ * 2. Each backup still without a category joins one: one they asked for if possible, otherwise a random
+ *    one among those with the fewest judges.
+ */
+export function planBackups({ judges, categories, perCat, maxPerJudge, diffFloors, only, rand = Math.random }) {
+  const cats = categories.map(c => ({ ...c, members: [...c.members], floors: [...c.floors] }));
+  const load = new Map(judges.map(j => [j.id, j.load || 0]));
+  const jitter = new Map(judges.map(j => [j.id, rand()]));
+  const pool = judges.filter(j => !only || j.id === only);
+  const adds = [];
+  const can = (j, c) => dietOk(j, c) && !c.members.includes(j.id) && !(diffFloors && j.floor && c.floors.includes(j.floor));
+  const add = (j, c, reason) => {
+    c.members.push(j.id);
+    if (j.floor) c.floors.push(j.floor);
+    load.set(j.id, load.get(j.id) + 1);
+    adds.push({ judgeId: j.id, categoryId: c.id, reason });
+  };
+  const options = c => pool.filter(j => can(j, c) && load.get(j.id) < maxPerJudge).length;
+  cats.filter(c => c.members.length < perCat).sort((a, b) => options(a) - options(b)).forEach(c => {
+    while (c.members.length < perCat) {
+      const cands = pool.filter(j => can(j, c) && load.get(j.id) < maxPerJudge);
+      if (!cands.length) break;
+      const rank = j => [j.backup && load.get(j.id) === 0 ? 0 : j.backup ? 1 : 2, (j.prefs || []).includes(c.id) ? 0 : 1, load.get(j.id), jitter.get(j.id)];
+      cands.sort((a, b) => compareArrays(rank(a), rank(b)));
+      add(cands[0], c, 'gap');
+    }
+  });
+  pool.filter(j => j.backup && load.get(j.id) === 0).forEach(j => {
+    const open = cats.filter(c => can(j, c));
+    if (!open.length) return;
+    const pref = open.filter(c => (j.prefs || []).includes(c.id));
+    const from = pref.length ? pref : open;
+    const fewest = Math.min(...from.map(c => c.members.length));
+    const choices = from.filter(c => c.members.length === fewest);
+    add(j, choices[Math.floor(rand() * choices.length) % choices.length], pref.length ? 'preferred' : 'random');
+  });
+  return { adds, short: cats.filter(c => c.members.length < perCat).map(c => ({ id: c.id, name: c.name, have: c.members.length })) };
+}
+
 export function entryList(nums) {
   return nums.map(n => '#' + n).join(', ');
 }
@@ -298,6 +369,7 @@ export const DEFAULT_SETTINGS = {
   top_floors: '3',
   special_counts: 'true',
   test_mode: 'true',
+  judging_started: 'false',
   twilio_from: '',
   organizer_phone: '',
 };

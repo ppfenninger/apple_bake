@@ -6,7 +6,7 @@ import {
 import {
   ensureSchema, activeEventId, getEvent, getSettings, setSettings, loadEvent, createEvent, now, randomToken, settingBool, settingNum,
 } from './db.js';
-import { runAssignment, sendJudging, syncJudging, resendJudge, judgeView, submitPicks, computeResults, sendSms } from './competition.js';
+import { runAssignment, sendJudging, syncJudging, resendJudge, judgeView, submitPicks, computeResults, sendSms, checkDelivery, twilioState, checkInJudge } from './competition.js';
 import { makeCookie, clearCookie, sessionRole, safeEqual } from './auth.js';
 
 class HttpError extends Error {
@@ -87,6 +87,32 @@ route('POST', '/api/signup', async ({ env, eventId, request }) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(eventId, name, kerberos, d.floor, phone, tags.join(', '), details, JSON.stringify(prefs), randomToken(), now()).run();
   }
   return { updated: !!existing };
+});
+
+// --- judge check-in (at the event, honor system) ---------------------------------
+
+route('GET', '/api/judge-checkin', async ({ env, eventId, url }) => {
+  const event = await getEvent(env.DB, eventId);
+  const q = String(url.searchParams.get('q') || '').trim().toLowerCase();
+  if (q.length < 2) return { eventName: event.name, judges: [] };
+  const rows = (await env.DB.prepare('SELECT id, name, kerberos, floor, checked_in FROM judges WHERE event_id = ? ORDER BY name').bind(eventId).all()).results;
+  const words = q.split(/\s+/);
+  const judges = rows.filter(j => words.every(w => j.name.toLowerCase().includes(w) || j.kerberos.toLowerCase() === w))
+    .slice(0, 10).map(j => ({ id: j.id, name: j.name, floor: j.floor, here: !!j.checked_in }));
+  return { eventName: event.name, judges };
+});
+
+route('POST', '/api/judge-checkin', async ({ env, eventId, request, url }) => {
+  const d = await body(request);
+  const r = await checkInJudge(env, eventId, Number(d.id), url.origin);
+  if (r.error) fail(404, 'We couldn\'t find that judge. Ask the organizer to add you.');
+  const res = (r.results || [])[0];
+  let message;
+  if (!r.started) message = 'You\'ll get a text with your judging link when judging starts.';
+  else if (res && res.ok) message = 'Judging has started, so we just texted you your judging link.';
+  else if (res) message = 'Judging has started, but your text didn\'t go out. Please find the organizer.';
+  else message = 'Judging has started. You\'re on the backup list for now; you\'ll get a text if you\'re needed.';
+  return { name: r.name, started: r.started, message };
 });
 
 route('GET', '/api/vote', async ({ env, eventId }) => {
@@ -240,7 +266,7 @@ route('GET', '/api/admin/data', async ({ env, viewId, eventId, url }) => {
   const log = (await env.DB.prepare('SELECT * FROM sms_log WHERE event_id = ? ORDER BY id DESC LIMIT 500').bind(viewId).all()).results;
   return {
     origin: url.origin, activeEventId: eventId, events, ...data, computed: computeResults(data), log,
-    restrictionOptions: RESTRICTIONS, twilioReady: !!(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN),
+    restrictionOptions: RESTRICTIONS, twilio: twilioState(env, data.settings),
   };
 }, 'admin');
 
@@ -282,7 +308,21 @@ route('POST', '/api/admin/assign', async ({ env, viewId }) => {
 
 route('POST', '/api/admin/send-judging', async ({ env, viewId, request, url }) => {
   const d = await body(request);
-  return sendJudging(env, viewId, url.origin, { restart: !!d.restart, closeCheckin: !!d.closeCheckin });
+  return sendJudging(env, viewId, url.origin, { restart: !!d.restart, closeCheckin: !!d.closeCheckin, dryRun: !!d.dryRun });
+}, 'admin');
+
+route('POST', '/api/admin/check-delivery', async ({ env, viewId, request }) => {
+  const d = await body(request);
+  return checkDelivery(env, viewId, d.id ? Number(d.id) : null);
+}, 'admin');
+
+route('POST', '/api/admin/checkin-all', async ({ env, viewId, request, url }) => {
+  const d = await body(request);
+  const value = d.value === false ? 0 : 1;
+  await env.DB.prepare('UPDATE judges SET checked_in = ?, checked_in_at = CASE WHEN ? = 1 THEN COALESCE(checked_in_at, ?) ELSE NULL END WHERE event_id = ?')
+    .bind(value, value, now(), viewId).run();
+  await syncJudging(env, viewId, url.origin);
+  return { ok: true };
 }, 'admin');
 
 route('POST', '/api/admin/resend/:judgeId', async ({ env, viewId, params, url }) => {
@@ -358,7 +398,7 @@ route('POST', '/api/admin/import-judges', async ({ env, viewId, request }) => {
 const TABLES = {
   judges: {
     cols: { name: 'text', kerberos: 'kerberos', floor: 'floor', phone: 'phone', restrictions: 'text', restriction_details: 'text',
-      preferred: 'ids', assigned: 'ids', locked: 'bool', skip_tiebreak: 'bool' },
+      preferred: 'ids', assigned: 'ids', locked: 'bool', skip_tiebreak: 'bool', checked_in: 'bool' },
     insert: { name: 'New judge' }, extra: () => ({ token: randomToken(), created_at: now() }),
   },
   entries: {
@@ -437,6 +477,9 @@ route('PATCH', '/api/admin/rows/:table/:id', async ({ env, viewId, params, reque
   } catch (e) {
     if (/UNIQUE/i.test(e.message)) fail(409, 'That number is already used.');
     throw e;
+  }
+  if (params.table === 'judges' && 'checked_in' in (d.values || {})) {
+    await env.DB.prepare('UPDATE judges SET checked_in_at = CASE WHEN checked_in = 1 THEN COALESCE(checked_in_at, ?) ELSE NULL END WHERE id = ?').bind(now(), Number(params.id)).run();
   }
   if (params.table === 'judging' && 'pick' in (d.values || {})) {
     await env.DB.prepare('UPDATE judging SET recheck = 0, picked_at = ? WHERE id = ?').bind(now(), Number(params.id)).run();

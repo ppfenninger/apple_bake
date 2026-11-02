@@ -196,7 +196,7 @@ function overview(v) {
   const decided = res.filter(r => r.status === 'decided').length;
   const pending = res.filter(r => r.status === 'pending');
   v.appendChild(el('<div class="stats">' +
-    '<div class="stat"><b>' + D.judges.length + '</b>judges</div>' +
+    '<div class="stat"><b>' + D.judges.filter(j => j.checked_in).length + ' / ' + D.judges.length + '</b>judges checked in</div>' +
     '<div class="stat"><b>' + D.entries.length + '</b>dishes</div>' +
     '<div class="stat"><b>' + decided + ' / ' + res.filter(r => r.status !== 'none').length + '</b>awards decided</div>' +
     '<div class="stat"><b>' + D.votes.reduce((n, x) => n + (x.votes || 0), 0) + '</b>votes</div></div>'));
@@ -210,7 +210,6 @@ function overview(v) {
     });
     sw.appendChild(row);
   });
-  if (!D.twilioReady) sw.appendChild(el('<p class="sub">Twilio secrets are not set yet, so real texts can\'t go out. See the README.</p>'));
 
   const steps = el('<section class="card steps"><h2>Steps</h2></section>');
   const report = el('<pre class="report hidden"></pre>');
@@ -227,7 +226,7 @@ function overview(v) {
         const lines = ['Assigned ' + r.judges + ' judges to ' + r.categories + ' categories.'];
         if (r.shortages.length) lines.push('', 'Short on judges:', ...r.shortages.map(x => '  ' + x.category + ' (' + x.have + ' of ' + x.need + ')'));
         if (r.overloaded.length) lines.push('', 'Given one extra category to cover gaps: ' + r.overloaded.join(', '));
-        if (r.unassigned.length) lines.push('', 'Not needed (tiebreaker pool): ' + r.unassigned.join(', '));
+        if (r.unassigned.length) lines.push('', 'Backups (if they check in, they fill a gap or join a category when judging starts): ' + r.unassigned.join(', '));
         if (r.noFloor.length) lines.push('', 'Unknown floor, so the floor rule could not be checked: ' + r.noFloor.join(', '));
         await refresh();
         const rep = $('view').querySelector('pre.report');
@@ -235,34 +234,21 @@ function overview(v) {
         rep.classList.remove('hidden');
       } catch (e) { fail(e); }
     }, 'primary'));
-  const closeBox = el('<label class="switch" style="padding:0;font-size:14px"><input type="checkbox"> Also close check-in</label>');
-  const sendBtn = button('Start judging: text the judges', async () => {
-    if (!sendBtn.dataset.armed) {
-      sendBtn.dataset.armed = '1';
-      sendBtn.textContent = /^true$/i.test(s.test_mode) ? 'Sure? (test mode: nothing is texted)' : 'Sure? Real texts will go out';
-      return;
-    }
-    try {
-      const r = await api(q('/api/admin/send-judging'), { body: { closeCheckin: closeBox.querySelector('input').checked } });
-      const lines = [(r.testMode ? 'Test mode: logged ' : 'Texted ') + r.texted + ' of ' + r.judges + ' judges. ' + (r.testMode ? 'Open the Texts tab to try the links yourself.' : '')];
-      if (r.gaps.length) lines.push('', 'Dishes but no judge (assign someone, then use Re-send on the Judges tab):', ...r.gaps.map(g => '  ' + g));
-      if (r.autoWon.length) lines.push('', 'Won automatically (only one dish): ' + r.autoWon.join(', '));
-      if (r.flagged) lines.push('', r.flagged + ' judging row(s) have a warning; see the Judging tab.');
-      await refresh();
-      const rep = $('view').querySelector('pre.report');
-      rep.textContent = lines.join('\n');
-      rep.classList.remove('hidden');
-    } catch (e) { fail(e); }
-  }, 'primary');
-  const sendWrap = el('<div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start"></div>');
-  sendWrap.appendChild(sendBtn);
-  sendWrap.appendChild(closeBox);
-  step('3. Start judging', 'Texts each assigned judge a personal link listing their dish numbers. Check-in can stay open: a dish checked in later is added to its category and those judges get a text. Running it again only texts judges who haven\'t been texted.', sendWrap);
-  step('4. Watch it come in', 'Ties go to a third judge automatically. Add paper tallies on the Votes tab, fix anything on the Results tab, then turn on "Results are public".');
+  const hereCount = D.judges.filter(j => j.checked_in).length;
+  step('3. Judges check in at the event', hereCount + ' of ' + D.judges.length + ' checked in. Judges look up their name on <a href="/here" target="_blank">' + esc(D.origin) + '/here</a> (also linked from the check-in laptop), or tick "Here" on the Judges tab. Only checked-in judges get texts.');
+  const sendWrap = el('<div style="display:flex;flex-direction:column;gap:6px;align-items:stretch;min-width:240px"></div>');
+  const started = D.judging.length > 0;
+  sendWrap.appendChild(button(started ? 'Text judges who still need a link' : 'Start judging', () => previewSend(), 'primary'));
+  step('4. Start judging', 'Texts each checked-in judge a personal link listing their dish numbers. Backups fill categories short on judges. You see who will be texted before anything is sent. Afterwards, a judge who checks in gets a text right away, and a dish checked in later is added to its category.', sendWrap);
+  steps.appendChild(sendPanel());
+  step('5. Watch it come in', 'Ties go to a third judge automatically. Add paper tallies on the Votes tab, fix anything on the Results tab, then turn on "Results are public".');
   steps.appendChild(report);
 
   const row = el('<div class="row"></div>');
-  row.appendChild(sw);
+  const left = el('<div></div>');
+  left.appendChild(sw);
+  left.appendChild(textingCard());
+  row.appendChild(left);
   row.appendChild(steps);
   v.appendChild(row);
 
@@ -273,7 +259,7 @@ function overview(v) {
 
   const links = el('<section class="card"><h2>Links</h2></section>');
   const o = D.origin;
-  [['Voting (print the QR for the tables)', '/vote'], ['Results', '/results'], ['Judge signup', '/signup'],
+  [['Voting (print the QR for the tables)', '/vote'], ['Results', '/results'], ['Judge signup', '/signup'], ['Judge check-in (at the event)', '/here'],
     ['Check-in (entry-table laptop) · PIN ' + s.checkin_pin, '/checkin'], ['Home', '/']].forEach(([label, path]) => {
     const r = el('<div style="margin:8px 0"><div class="sub">' + esc(label) + '</div><a href="' + path + '" target="_blank">' + esc(o + path) + '</a></div>');
     links.appendChild(r);
@@ -281,15 +267,128 @@ function overview(v) {
   const qrBox = el('<div class="qr" id="voteQr"></div>');
   links.appendChild(qrBox);
   try { new QRCode(qrBox, { text: o + '/vote', width: 160, height: 160 }); } catch (e) { qrBox.remove(); }
-  const test = el('<div style="margin-top:14px"><label>Send a test text</label><div class="toolbar"><input type="tel" placeholder="617-555-1234" style="max-width:220px"></div></div>');
-  test.querySelector('.toolbar').appendChild(button('Send for real', async () => {
-    try {
-      const r = await api(q('/api/admin/test-sms'), { body: { to: test.querySelector('input').value, real: true } });
-      flash('Test text: ' + r.status, r.ok ? 'ok' : 'error');
-    } catch (e) { fail(e); }
-  }));
-  links.appendChild(test);
   v.appendChild(links);
+}
+
+// ---------------------------------------------------------------------------
+// Texting: setup checklist, test text, and the Start judging preview
+// ---------------------------------------------------------------------------
+
+const statusClass = st => /^(delivered|TEST)/.test(st) ? 'good' : /^not /.test(st) ? 'bad' : 'pending';
+
+function textingCard() {
+  const t = D.twilio;
+  const item = (cls, text) => '<li class="' + cls + '">' + text + '</li>';
+  const sidBad = t.problems.find(p => /ACCOUNT_SID/.test(p));
+  const card = el('<section class="card"><h2>Texting</h2><ul class="checks">' +
+    item(sidBad ? 'bad' : 'good', sidBad ? esc(sidBad) : 'Twilio account SID is set (' + esc(t.sid) + ')') +
+    item(t.token ? 'good' : 'bad', t.token ? 'Twilio auth token is set' : 'The TWILIO_AUTH_TOKEN secret is missing in Cloudflare') +
+    item(t.from ? 'good' : 'bad', t.from ? 'Texts come from ' + esc(t.from) : esc(t.problems.find(p => /phone number/.test(p)) || 'No Twilio phone number on the Settings tab.')) +
+    (t.testMode ? item('pending', 'Test mode is on: judges\' texts are only logged on the Texts tab, nothing reaches phones. Turn it off under Switches when you\'re ready.')
+      : item('good', 'Test mode is off: judges get real texts')) +
+    '</ul><label>Send yourself a real test text</label><div class="toolbar"><input type="tel" placeholder="617-555-1234" style="max-width:200px"></div>' +
+    '<div class="msg hidden"></div></section>');
+  const input = card.querySelector('input');
+  const out = card.querySelector('.msg');
+  const show = (text, cls) => { out.className = 'msg ' + (cls === 'good' ? 'ok' : cls === 'bad' ? 'error' : 'pending'); out.textContent = text; };
+  const sendBtn = button('Send', async () => {
+    sendBtn.disabled = true;
+    show('Sending...', 'pending');
+    try {
+      const r = await api(q('/api/admin/test-sms'), { body: { to: input.value, real: true } });
+      show(r.ok ? 'Twilio accepted it. Checking whether it reached the phone...' : r.status, r.ok ? 'pending' : 'bad');
+      if (r.ok && r.id) await watchDelivery(r.id, st => show(st, statusClass(st)));
+    } catch (e) { show(e.message, 'bad'); }
+    sendBtn.disabled = false;
+  });
+  card.querySelector('.toolbar').appendChild(sendBtn);
+  return card;
+}
+
+/** Asks Twilio about one text a few times until it is delivered or fails. */
+async function watchDelivery(id, onStatus) {
+  for (const wait of [3000, 5000, 8000, 15000, 30000]) {
+    await new Promise(r => setTimeout(r, wait));
+    try {
+      const r = await api(q('/api/admin/check-delivery'), { body: { id } });
+      const row = r.rows.find(x => x.id === id);
+      if (!row) return;
+      onStatus(row.status.startsWith('delivered') ? 'Delivered! Texting works.' : row.status);
+      if (/^(delivered|not delivered)/.test(row.status)) return;
+    } catch (e) { onStatus('Could not check delivery: ' + e.message); return; }
+  }
+  onStatus('Twilio has not reported delivery yet. Check the Texts tab in a minute, or the message log in the Twilio console.');
+}
+
+let sendState = null; // {mode: 'preview' | 'result', data}
+
+async function previewSend() {
+  try {
+    sendState = { mode: 'preview', data: await api(q('/api/admin/send-judging'), { body: { dryRun: true } }) };
+  } catch (e) { sendState = { mode: 'error', error: e.message }; }
+  await refresh();
+}
+
+function sendPanel() {
+  const box = el('<div class="send-panel"></div>');
+  if (!sendState) return box;
+  const d = sendState.data;
+  const close = button('Close', () => { sendState = null; render(); });
+  const list = items => '<ul>' + items.map(x => '<li>' + x + '</li>').join('') + '</ul>';
+  if (sendState.mode === 'error') {
+    box.appendChild(el('<div class="msg error">' + esc(sendState.error) + '</div>'));
+    box.appendChild(close);
+    return box;
+  }
+  const warnings = [];
+  if (d.gaps.length) warnings.push('These categories have dishes but no checked-in judge: ' + esc(d.gaps.join(', ')) + '. Check someone in, or assign a judge on the Judges tab.');
+  if (d.oneJudge.length) warnings.push('Only one checked-in judge, who decides alone: ' + esc(d.oneJudge.join(', ')) + '.');
+  if (d.notHere.length) warnings.push('Assigned but not checked in, so not texted: ' + esc(d.notHere.join(', ')) + '. They get a text as soon as they check in.');
+  if (d.autoWon.length) warnings.push('Only one dish, so it wins without judging: ' + esc(d.autoWon.join(', ')) + '.');
+  if (d.noPhone.length) warnings.push('No phone number, so no text: ' + esc(d.noPhone.join(', ')) + '. Their link is on the Judges tab.');
+  if (!d.testMode && !d.twilio.ready) warnings.push('Real texts can\'t go out yet: ' + esc(d.twilio.problems.join(' ')));
+
+  if (sendState.mode === 'preview') {
+    if (!d.judges) {
+      box.appendChild(el('<div class="msg error"><b>Nobody to text yet.</b>' + list(d.why.map(esc)) + '</div>'));
+      if (warnings.length) box.appendChild(el('<div class="sub">' + list(warnings) + '</div>'));
+      box.appendChild(close);
+      return box;
+    }
+    box.appendChild(el('<div class="msg ' + (d.testMode ? 'pending' : 'ok') + '"><b>' +
+      d.here + ' of ' + d.total + ' judges checked in. ' + (d.testMode ? 'Test mode is on: these ' + d.judges + ' text' + (d.judges === 1 ? '' : 's') + ' will only be logged on the Texts tab. Nothing reaches phones.'
+        : 'This sends ' + d.judges + ' real text' + (d.judges === 1 ? '' : 's') + '.') + '</b>' +
+      list(d.preview.map(p => esc(p.name) + (p.phone ? ' (' + esc(p.phone) + ')' : ' (no phone)') + ': ' + esc(p.categories.join(', ')))) + '</div>'));
+    if (d.backups.length) box.appendChild(el('<div class="sub"><b>Backup judges placed:</b>' + list(d.backups.map(b => esc(b.name) + ' to ' + esc(b.category) + ' (' + esc(b.reason) + ')')) + '</div>'));
+    if (warnings.length) box.appendChild(el('<div class="sub">' + list(warnings) + '</div>'));
+    const closeBox = el('<label class="switch" style="padding:0;font-size:14px"><input type="checkbox"> Also close check-in</label>');
+    box.appendChild(closeBox);
+    const bar = el('<div class="toolbar"></div>');
+    const go = button(d.testMode ? 'Log ' + d.judges + ' test text' + (d.judges === 1 ? '' : 's') : 'Send ' + d.judges + ' text' + (d.judges === 1 ? '' : 's'), async () => {
+      go.disabled = true; go.textContent = 'Sending...';
+      try {
+        sendState = { mode: 'result', data: await api(q('/api/admin/send-judging'), { body: { closeCheckin: closeBox.querySelector('input').checked } }) };
+      } catch (e) { sendState = { mode: 'error', error: e.message }; }
+      await refresh();
+    }, 'primary');
+    go.style.width = 'auto';
+    bar.appendChild(go);
+    bar.appendChild(button('Cancel', () => { sendState = null; render(); }));
+    box.appendChild(bar);
+    return box;
+  }
+
+  // Result
+  const failed = d.results.filter(r => !r.ok);
+  box.appendChild(el('<div class="msg ' + (failed.length ? 'error' : 'ok') + '"><b>' +
+    (d.testMode ? 'Logged ' + d.texted + ' of ' + d.judges + ' test texts. Open the Texts tab to try the links.' : 'Sent ' + d.texted + ' of ' + d.judges + ' texts to Twilio.') + '</b>' +
+    list(d.results.map(r => esc(r.name) + ': ' + esc(r.status))) + '</div>'));
+  if (d.backups.length) box.appendChild(el('<div class="sub"><b>Backup judges placed:</b>' + list(d.backups.map(b => esc(b.name) + ' to ' + esc(b.category) + ' (' + esc(b.reason) + ')')) + '</div>'));
+  if (!d.testMode && d.texted) box.appendChild(el('<p class="sub">Delivery reports from Twilio show up on the Texts tab (click "Check delivery").</p>'));
+  if (warnings.length) box.appendChild(el('<div class="sub">' + list(warnings) + '</div>'));
+  if (d.flagged) box.appendChild(el('<p class="sub">' + d.flagged + ' judging row(s) have a warning; see the Judging tab.</p>'));
+  box.appendChild(close);
+  return box;
 }
 
 function judges(v) {
@@ -297,6 +396,12 @@ function judges(v) {
   const bar = el('<div class="toolbar"></div>');
   bar.appendChild(button('+ Add judge', () => addRow('judges')));
   bar.appendChild(button('Import CSV', () => imp.classList.toggle('hidden')));
+  bar.appendChild(button('Check in everyone', async () => {
+    try { await api(q('/api/admin/checkin-all'), { body: { value: true } }); await refresh(); flash('Everyone is checked in.'); } catch (e) { fail(e); }
+  }));
+  bar.appendChild(button('Clear check-ins', async () => {
+    try { await api(q('/api/admin/checkin-all'), { body: { value: false } }); await refresh(); flash('Check-ins cleared.'); } catch (e) { fail(e); }
+  }));
   bar.appendChild(el('<span class="grow"></span>'));
   bar.appendChild(exportLink('judges'));
   v.appendChild(bar);
@@ -311,6 +416,7 @@ function judges(v) {
   v.appendChild(imp);
   const sentTo = new Set(D.judging.map(r => r.judge_id));
   editTable(v, 'judges', D.judges, [
+    { key: 'checked_in', label: 'Here', type: 'bool' },
     { key: 'name', label: 'Name', type: 'text' },
     { key: 'kerberos', label: 'Kerberos', type: 'text' },
     { key: 'floor', label: 'Floor', type: 'text', fmt: r => r.floor ? esc(r.floor) : '<span class="pill warn">?</span>' },
@@ -318,7 +424,7 @@ function judges(v) {
     { key: 'restrictions', label: 'Restrictions', type: 'text', fmt: r => r.tags.map(t => '<span class="pill' + (t === 'other' ? ' warn' : '') + '">' + esc(t) + '</span>').join('') },
     { key: 'restriction_details', label: 'Diet notes', type: 'text' },
     { key: 'preferred', label: 'Asked for', type: 'ids', options: cats, fmt: r => r.preferred.map(id => '<span class="pill">' + esc(catName(id)) + '</span>').join('') },
-    { key: 'assigned', label: 'Assigned', type: 'ids', options: cats, fmt: r => r.assigned.map(id => '<span class="pill' + (r.preferred.includes(id) ? ' good' : '') + '">' + esc(catName(id)) + '</span>').join('') },
+    { key: 'assigned', label: 'Assigned', type: 'ids', options: cats, fmt: r => r.assigned.length ? r.assigned.map(id => '<span class="pill' + (r.preferred.includes(id) ? ' good' : '') + '">' + esc(catName(id)) + '</span>').join('') : '<span class="sub">backup</span>' },
     { key: 'locked', label: 'Lock', type: 'bool' },
     { key: 'skip_tiebreak', label: 'No tiebreaks', type: 'bool' },
   ], {
@@ -336,7 +442,7 @@ function judges(v) {
       return out;
     },
   });
-  v.appendChild(el('<p class="sub">Click a cell to edit. Green categories are ones the judge asked for. "Link" copies the judge\'s personal judging link.</p>'));
+  v.appendChild(el('<p class="sub">Click a cell to edit. Green categories are ones the judge asked for. Judges with no category are backups. "Here" means checked in at the event; only checked-in judges get texts, and after judging starts, ticking it texts them right away. "Link" copies the judge\'s personal judging link.</p>'));
 }
 
 function dishes(v) {
@@ -514,16 +620,31 @@ function settings(v) {
   v.appendChild(card);
 }
 
+let deliveryChecked = 0;
 function texts(v) {
-  v.appendChild(el('<p class="sub" style="margin-top:0">Every text the site sent or, in test mode, would have sent. In test mode you can open the judging links here to try them.</p>'));
+  v.appendChild(el('<p class="sub" style="margin-top:0">Every text the site sent or, in test mode, would have sent. In test mode you can open the judging links here to try them. ' +
+    '"Waiting for delivery report" means Twilio accepted it; click Check delivery to ask Twilio whether it reached the phone.</p>'));
+  const bar = el('<div class="toolbar"><span class="grow"></span></div>');
+  const check = button('Check delivery', async () => {
+    check.disabled = true; check.textContent = 'Checking...';
+    try { const r = await api(q('/api/admin/check-delivery'), { body: {} }); deliveryChecked = Date.now(); await refresh(); flash('Checked ' + r.checked + ' text' + (r.checked === 1 ? '' : 's') + ' with Twilio.'); }
+    catch (e) { fail(e); check.disabled = false; check.textContent = 'Check delivery'; }
+  });
+  bar.insertBefore(check, bar.firstChild);
+  v.appendChild(bar);
   const linkify = s => esc(s).replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank">$1</a>');
   editTable(v, 'sms_log', D.log, [
     { key: 'at', label: 'Time', get: r => new Date(r.at).toLocaleString() },
     { key: 'name', label: 'To' },
     { key: 'phone', label: 'Phone' },
     { key: 'body', label: 'Message', fmt: r => linkify(r.body) },
-    { key: 'status', label: 'Status', fmt: r => '<span class="pill' + (/^(sent|TEST)/.test(r.status) ? '' : ' warn') + '">' + esc(r.status) + '</span>' },
+    { key: 'status', label: 'Status', fmt: r => '<span class="pill ' + ({ good: 'good', bad: 'warn', pending: '' })[statusClass(r.status)] + '">' + esc(r.status) + '</span>' },
   ]);
+  // Ask Twilio once when the tab opens if some texts are still waiting.
+  if (D.log.some(r => r.sid && /waiting|^sent$/.test(r.status)) && Date.now() - deliveryChecked > 20000) {
+    deliveryChecked = Date.now();
+    api(q('/api/admin/check-delivery'), { body: {} }).then(r => { if (r.checked && tab === 'texts') refresh(); }).catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------------------
